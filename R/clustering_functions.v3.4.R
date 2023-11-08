@@ -1,8 +1,6 @@
 ##### Clustering functions
-if (TRUE)
-{
-  # functions
-  membership.to.mem <- function(membership)
+# functions
+membership.to.mem <- function(membership)
   {
     cls <- setdiff(unique(membership),NA)
     mem <- Matrix::Matrix(0,nrow = length(membership),ncol = length(cls))
@@ -49,7 +47,7 @@ if (TRUE)
   
   find_optimal_solution.leiden.v2 <- function(g,resol.vec = seq(0.1,2,0.0125),pcut= 0.05,n.perm = 10,min.width = 0.2,seed = 1234)
   {
-    library(rpart)
+    
     grand.mean <- function(M, N) {weighted.mean(M, N)}
     grand.sd   <- function(S, M, N) {sqrt(weighted.mean(S^2 + M^2, N) -
                                             weighted.mean(M, N)^2)}
@@ -94,14 +92,16 @@ if (TRUE)
       
       mem = membership.to.mem(membership = cout$membership)
       k.global <- Matrix::rowSums(adj,na.rm = T)
-      k.in <- Matrix::colSums((t(mem) %*% adj) * t(mem))
+      mm = (Matrix::t(mem) %*% adj) * Matrix::t(mem)
+      #print(dim(mm))
+      k.in <- Matrix::colSums(mm)
       so = (k.global - k.in)/k.global;
       
     
       sr = lapply(1:n.perm,function(n) {
         mem = membership.to.mem(membership = sample(cout$membership,size = length(cout$membership)))
         k.global <- Matrix::rowSums(adj,na.rm = T)
-        k.in <- Matrix::colSums((t(mem) %*% adj) * t(mem))
+        k.in <- Matrix::colSums((Matrix::t(mem) %*% adj) * Matrix::t(mem))
         (k.global - k.in)/k.global;
       })
       
@@ -233,15 +233,235 @@ if (TRUE)
     return(output)
   }
   
-  split_network <- function(g,mi,d.func = function(x) x,alpha = 1,min.width = 0.1,node.perturb.prop = 0.05)
+  #' @title Perform adaptive split of a network (AdaptSplit)
+  #' @name split_network
+  #' @docType package
+  #' @description Sweeps over the clustering resolution in \code{[0.1,2]} to find the most granular clustering results. 
+  #' @param g An igraph object containing the network
+  #' @param mi An integer. The clusters will be indexed, starting from the integer specified by mi.  
+  #' @param d.func a function to convert the edge weights into edge function. 
+  #' @param alpha Compactness resolution parameter. This value is used to calculate the compactness of the child clusters obtained from the split. 
+  #' @param node.perturb.prop Proportion of nodes to randomly shuffle to calculate the reference distribution of intra-cluster connectivity. 
+  #' @return Returns a list containing clustering results with optimal.modules (the final results from adapt split), resolution.tested (clustering resolution sweeped), resolution.used (the final value of clustering resolution), and module.table containing the compactness and intra-cluster connectivity stats.
+  #' @examples 
+  #' data(pbmc_8k_msc_results)
+  #' split_network(g = pbmc_8k_msc_results$cell.network,mi = 0)
+  #' @export
+  NULL
+  split_network <- function(g,mi,d.func = function(x) x,alpha = 1,node.perturb.prop = 0.05)
   {
+    require(rpart)
+    find_optimal_solution.leiden.v2 <- function(g,resol.vec = seq(0.1,2,0.0125),pcut= 0.05,n.perm = 10,min.width = 0.2,seed = 1234)
+    {
+      
+      grand.mean <- function(M, N) {weighted.mean(M, N)}
+      grand.sd   <- function(S, M, N) {sqrt(weighted.mean(S^2 + M^2, N) -
+                                              weighted.mean(M, N)^2)}
+      # m1, m2: the sample means
+      # s1, s2: the sample standard deviations
+      # n1, n2: the same sizes
+      # m0: the null value for the difference in means to be tested for. Default is 0. 
+      # equal.variance: whether or not to assume equal variance. Default is FALSE. 
+      t.test2 <- function(m1,m2,s1,s2,n1,n2,m0=0,equal.variance=FALSE)
+      {
+        if( equal.variance==FALSE ) 
+        {
+          se <- sqrt( (s1^2/n1) + (s2^2/n2) )
+          # welch-satterthwaite df
+          df <- ( (s1^2/n1 + s2^2/n2)^2 )/( (s1^2/n1)^2/(n1-1) + (s2^2/n2)^2/(n2-1) )
+        } else
+        {
+          # pooled standard deviation, scaled by the sample sizes
+          se <- sqrt( (1/n1 + 1/n2) * ((n1-1)*s1^2 + (n2-1)*s2^2)/(n1+n2-2) ) 
+          df <- n1+n2-2
+        }      
+        t <- (m1-m2-m0)/se 
+        dat <- c(m1-m2, se, t, 2*pt(-abs(t),df))    
+        names(dat) <- c("Difference of means", "Std Error", "t", "p-value")
+        return(dat) 
+      }
+      
+      output = NULL 
+      clsm = kratio = matrix(0,nrow = vcount(g),ncol = 0);
+      rownames(clsm) = rownames(kratio) = V(g)$name
+      cls.f = NULL
+      adj = as_adj(graph = g,attr = "weight")
+      kr=vector("list",length(resol.vec))
+      tstat.mat = matrix(nrow = 0,ncol = 5);
+      qval = rep(NA,length(resol.vec))
+      set.seed(seed)
+      for (ri in 1:length(resol.vec))
+      {
+        cout = cluster_leiden(graph = g,objective_function = "modularity",resolution_parameter = resol.vec[ri])
+        qval[ri] = cout$quality
+        clsm = cbind(clsm,cout$membership)
+        
+        mem = membership.to.mem(membership = cout$membership)
+        k.global <- Matrix::rowSums(adj,na.rm = T)
+        mm = (Matrix::t(mem) %*% adj) * Matrix::t(mem)
+        #print(dim(mm))
+        k.in <- Matrix::colSums(mm)
+        so = (k.global - k.in)/k.global;
+        
+        
+        sr = lapply(1:n.perm,function(n) {
+          mem = membership.to.mem(membership = sample(cout$membership,size = length(cout$membership)))
+          k.global <- Matrix::rowSums(adj,na.rm = T)
+          k.in <- Matrix::colSums((Matrix::t(mem) %*% adj) * Matrix::t(mem))
+          (k.global - k.in)/k.global;
+        })
+        
+        df.r = data.frame(n = sapply(sr,length),mean = sapply(sr,mean),sd = sapply(sr,sd))
+        
+        mu.r = grand.mean(M = df.r$mean,N = df.r$n)
+        sd.r = grand.sd(S = df.r$sd,M = df.r$mean,N = df.r$n)
+        
+        mu.o = mean(so);sd.o = sd(so)
+        
+        t.stat = t.test2(m1 = mu.o,m2 = mu.r,s1 = sd.o,s2 = sd.r,n1 = nrow(mem),n2 = nrow(mem),m0=0,equal.variance=FALSE)
+        t.stat = c(t.stat,"fold.change" = mu.o/mu.r)
+        tstat.mat = rbind(tstat.mat,t.stat)
+        rm(t.stat)
+      }
+      
+      # check
+      if (any(is.nan(tstat.mat[,3]) | qval < 0)) 
+      {
+        ii = !is.nan(tstat.mat[,3]) & qval > 0 & tstat.mat[,4] < pcut
+        tstat.mat = rbind(tstat.mat[ii,])
+        resol.vec = resol.vec[ii]
+      }
+      
+      output = NULL
+      if (nrow(tstat.mat) > 5)
+      {
+        do.check = FALSE
+        if (length(unique(tstat.mat[,5])) > 1)
+        {
+          # check if the t-statistics do have steps in the curves: if there is a step, the distribution shouldn't follow normal distribution
+          step.check = shapiro.test(x = tstat.mat[,5])
+          if (step.check$p.value < pcut) do.check = TRUE
+          
+        }else{
+          ii = ceiling(length(resol.vec)/2)
+          resol.f = resol.vec[ii]
+          cls.f = clsm[,ii]
+          output = list(optimal.modules = factor(cls.f),cluster.matrix = clsm,
+                        resolution.tested = resol.vec,
+                        resolution.used = resol.f)
+        }
+        if (do.check)
+        {
+          cat("Step detected...\n")
+          tree <- rpart(-tstat.mat[,5] ~ resol.vec)
+          
+          # find the break points leading to biggest gap
+          yfit = predict(tree, data.frame(x=resol.vec))
+          
+          if (any(abs(diff(yfit)) > 1E-320))
+          {
+            break.points = which(abs(diff(yfit)) > 1E-320)
+            break.dir = sign(diff(yfit))[break.points]
+            
+            init = 1
+            break.points = c(break.points,length(yfit))
+            intervals = matrix(0,nrow = 0,ncol = 2)
+            for (i in 1:length(break.points))
+            {
+              intervals = rbind(intervals,c(init,break.points[i]))
+              init = break.points[i] + 1
+            }
+            rm(init)
+            interval.val = yfit[intervals[,1]]
+            
+            interval.data = data.frame(xo = intervals[,1],xf = intervals[,2],height = interval.val,
+                                       break.dir = c(0,break.dir))
+            nc = rep(NA,nrow(interval.data))
+            for (i in 1:nrow(interval.data)) nc[i] = mean(apply(clsm[,interval.data$xo[i]:interval.data$xf[i]],2,function(x) length(unique(x))))
+            interval.data$nc = nc
+            
+            # clear into monotonic descending data
+            init = interval.data$height[1]
+            bad.row = c()
+            for (i in 2:nrow(interval.data))
+            {
+              if (interval.data$height[i] > init) bad.row = c(bad.row,i)
+              if (interval.data$height[i] < init) init = interval.data$height[i]
+            }
+            vec = rep(TRUE,nrow(interval.data));vec[bad.row] = FALSE
+            interval.data$is.descending = vec
+            
+            vec = rep(FALSE,nrow(interval.data))
+            interval.data$resol.width = resol.vec[interval.data$xf] - resol.vec[interval.data$xo]
+            
+            # get cluster number call
+            interval.data$n.cluster = apply(do.call('cbind',interval.data[,1:2]),1,function(x) median(apply(clsm[,x[1]:x[2]],2,function(y) length(unique(y)))))
+            
+            # get the initial drop
+            vi = min(which(interval.data$is.descending & interval.data$resol.width >= min.width & interval.data$n.cluster > 1))
+            if (!is.infinite(vi)) 
+            {
+              resol.f = resol.vec[median(interval.data$xo[vi]:interval.data$xf[vi])]
+              cls.f = clsm[,which(resol.vec == resol.f)]
+            }else{
+              resol.f = NULL
+            }
+            
+          }else{
+            resol.f = NULL
+          }
+          
+          if (!is.null(resol.f))
+          {
+            # plot out fitted steps
+            plot.new()
+            plot(resol.vec,-tstat.mat[,5],xlab = "Resolution (\u03B3)",ylab = "")
+            lines(resol.vec,predict(tree, data.frame(x=resol.vec)),col = "blue")
+            abline(v = resol.f,col = "red",lty = 2)
+            
+            cls.f = clsm[,which(resol.vec == resol.f)]
+            output = list(optimal.modules = factor(cls.f),cluster.matrix = clsm,
+                          resolution.tested = resol.vec,
+                          resolution.used = resol.f)
+            
+          }
+          
+          
+        }else{
+          ii = ceiling(length(resol.vec)/2)
+          resol.f = resol.vec[ii]
+          cls.f = clsm[,ii]
+          output = list(optimal.modules = factor(cls.f),cluster.matrix = clsm,
+                        resolution.tested = resol.vec,
+                        resolution.used = resol.f)
+        }
+      }
+      return(output)
+    }
+    membership.to.mem <- function(membership)
+    {
+      cls <- setdiff(unique(membership),NA)
+      mem <- Matrix::Matrix(0,nrow = length(membership),ncol = length(cls))
+      for (i in 1:length(cls)) mem[which(membership == cls[i]),i] <- 1;
+      colnames(mem) <- cls;
+      rownames(mem) <- names(membership)
+      return(mem)
+    }
+    convert_mat_to_edgelist <- function(m)
+    {
+      ## quickly convert matrix to three column list
+      ij = do.call('rbind',lapply(1:(ncol(m)-1),function(x,n) {rr = rep(x);cc = (x+1):n;cbind(rr,cc)},n = ncol(m)));
+      colnames(ij) = c("ri","ci")
+      w = m[ij_to_lin(rr = ij[,1],cc = ij[,2],n = ncol(m))]
+      cbind(ij,w)
+    }
     cat("# Commence coarse-grained structure detection...\n")
     output = NULL
     #g = subgraph(graph = g,vids = mods$M12)
     
     set.seed(1234)
     
-    clus.res = find_optimal_solution.leiden.v2(g = g,min.width = min.width)
+    clus.res = find_optimal_solution.leiden.v2(g = g,min.width = 0.1)
     
     if (!is.null(clus.res))
     {
@@ -298,7 +518,9 @@ if (TRUE)
         adjm = get.adjacency(g)
         mem = membership.to.mem(clsvec)
         adjm = adjm[match(rownames(mem),rownames(adjm)),match(rownames(mem),colnames(adjm))]
-        link.mat = t(mem) %*% adjm %*% mem
+        link.mat = Matrix::t(mem) %*% adjm %*% mem;
+        link.mat = as.matrix(link.mat)
+        
         diag(link.mat) = diag(link.mat)/2
         intra.link.ratio = diag(link.mat)/rowSums(link.mat)
         return(intra.link.ratio)
@@ -339,6 +561,21 @@ if (TRUE)
     return(output)
   }
   
+  #' @title Calculate the alpha value for compactness 
+  #' @name identify_scale_parameter
+  #' @docType package
+  #' @description Estimates the compactness parameter alpha via subnetwork sampling. 
+  #' @param g An igraph object containing the network
+  #' @param nv An integer. Number of random nodes to sample for neighborhood search.
+  #' @param nr.max Neighborhood layer to expand.
+  #' @param d.func a function to convert the edge weights into edge function. 
+  #' @param mode A character value from either of "diameter" or "mean". Decide to estimate the compactness based on network diameter (i.e. the longest of the pairwise shortest path distance), or mean (i.e. mean of all pairwise shortest path distance). 
+  #' @return Returns a numeric value for the alpha value. 
+  #' @examples 
+  #' data(pbmc_8k_msc_results)
+  #' identify_scale_parameter(pbmc_8k_msc_results$cell.network,mode = "diameter")
+  #' @export
+  NULL
   identify_scale_parameter <- function(g,nv = 100,nr.max = 3,seed = 1234,d.func = function(x) x,mode = c("diameter","mean"))
   {
     overall.size = alpha.val = c()
@@ -378,7 +615,26 @@ if (TRUE)
     
   }
   
-  iterative_clustering <- function(g.in,min.size = 10,d.func = function(x) sqrt(2*(1-x)),alpha = 1,min.width = 0.1,pcut = 0.05,seed = 1234)
+  #' @title Iterative top-down clustering workflow 
+  #' @name iterative_clustering
+  #' @docType package
+  #' @description Given input cell network, performs the iterative clustering to probe the multi-scale structure. 
+  #' @param g.in An igraph object containing the network
+  #' @param min.size An integer. The minumum cluster size threshold.
+  #' @param alpha The alpha exponent for compactness calculation. Can be obtained from identify_scale_parameter().
+  #' @param d.func a function to convert the edge weights into edge function. Default is d(x) = sqrt(2*(1-x)), the metric distance for correlation coefficient. 
+  #' @param pcut A numeric. The p-value to identify clusters with significantly high intra-cluster connectivity. Default is 0.05.  
+  #' @param seed Seed value to initialize the random sampling. Default is 1234.
+  #' @return Returns a numeric value for the alpha value. 
+  #' @seealso [identify_scale_parameter()]
+  #' @examples 
+  #' \donttest{
+  #' data(pbmc_8k_msc_results)
+  #' alpha.val = identify_scale_parameter(pbmc_8k_msc_results$cell.network,mode = "diameter")
+  #' iter.res = iterative_clustering(g.in = pbmc_8k_msc_results$cell.network,alpha = alpha.val)
+  #' }
+  #' @export
+  iterative_clustering <- function(g.in,min.size = 10,d.func = function(x) sqrt(2*(1-x)),alpha = 1,pcut = 0.05,seed = 1234)
   {
     # initialize
     go = list(M0 = g.in)
@@ -421,7 +677,7 @@ if (TRUE)
         out = NULL
         if (is.single.graph)
         {
-          out = split_network(g = gi,mi = mi,d.func = d.func,alpha = alpha,min.width = min.width)
+          out = split_network(g = gi,mi = mi,d.func = d.func,alpha = alpha)
           
         }else{
           cout = components(gi);
@@ -512,9 +768,30 @@ if (TRUE)
     return(output)
   }
   
+  #' @title Parallelized, iterative top-down clustering workflow 
+  #' @name iterative_clustering.par
+  #' @docType package
+  #' @description Given input cell network, performs the iterative clustering to probe the multi-scale structure with parallelization. 
+  #' @param g.in An igraph object containing the network
+  #' @param min.size An integer. The minumum cluster size threshold.Default is 10. 
+  #' @param alpha The alpha exponent for compactness calculation. Can be obtained from identify_scale_parameter().
+  #' @param d.func a function to convert the edge weights into edge function. Default is d(x) = sqrt(2*(1-x)), the metric distance for correlation coefficient. 
+  #' @param pcut A numeric. The p-value to identify clusters with significantly high intra-cluster connectivity. Default is 0.05.  
+  #' @param seed Seed value to initialize the random sampling. Default is 1234.
+  #' @param valid.gate Filtering method to identify significant clusters. "density" compares intra-cluster link density between parent and child clusters. "compact" compared compactness with the parent clusters. "both" uses "density" and "compact" filters simultaneously. Default is "both".
+  #' @param n.cores An integer for the number of cores for parallelization 
+  #' @return Returns a numeric value for the alpha value. 
+  #' @seealso [identify_scale_parameter()]
+  #' @examples 
+  #' \donttest{
+  #' data(pbmc_8k_msc_results)
+  #' alpha.val = identify_scale_parameter(pbmc_8k_msc_results$cell.network,mode = "diameter")
+  #' iter.res = iterative_clustering.par(g.in = pbmc_8k_msc_results$cell.network,alpha = alpha.val,n.cores = 4,valid.gate = "both")
+  #' }
+  #' @export
   iterative_clustering.par <- function(g.in,min.size = 10,
                                    d.func = function(x) sqrt(2*(1-x)),
-                                   alpha = 1,min.width = 0.1,pcut = 0.05,seed = 1234,
+                                   alpha = 1,pcut = 0.05,seed = 1234,
                                    valid.gate = c("density","compact","both"),
                                    n.cores = 4)
   {
@@ -550,8 +827,8 @@ if (TRUE)
       indiv.run = rep(TRUE,length(go))
       
       # run clustering in parallel
-      out.lst <- foreach(i=1:length(go),.packages = c("igraph","MEGENA","Matrix"),
-                         .export = c("find_optimal_solution.leiden.v2","split_network","membership.to.mem")) %dopar% {
+      out.lst <- foreach(i=1:length(go),.packages = c("igraph","MEGENA","Matrix","rpart"),.export = c("convert_mat_to_edgelist","find_optimal_solution.leiden.v2","split_network","membership.to.mem")) %dopar% {
+        require(rpart)
         is.single.graph = FALSE
         gi = go[[i]]
         if (is.connected(gi))
@@ -571,7 +848,7 @@ if (TRUE)
         out = NULL
         if (is.single.graph)
         {
-          out = split_network(g = gi,mi = mi,d.func = d.func,alpha = alpha,min.width = min.width)
+          out = split_network(g = gi,mi = mi,d.func = d.func,alpha = alpha)
           
         }else{
           cout = components(gi);
@@ -673,9 +950,44 @@ if (TRUE)
     output = list(modules = modules,module.table = module.table,cell.network = g.in,alpha.value = alpha)
     return(output)
   }
-  
-  # higher level function to take the inputs
-  run_msc_pipeline.v2 <- function(dat,bcnt,n.cores = 4,min.cells = 5,
+
+#' multi-scale clustering workflow
+#' 
+#' @description Wrapper function to perform LEN and top-down iterative clustering altogether. 
+#' @docType package
+#' @param dat A log-normalized single-cell expression matrix (rows: genes, columns: cell).
+#' @param bcnt A binary matrix of genes (row) by cells (column). If expressed, \code{bcnt[i,j] = 1}, otherwise 0.   
+#' @param n.cores An integer for the number of cores for parallelization 
+#' @param min.cells An integer specifying the minumum cell cluster size
+#' @param sim.func A function to calculate cell-cell similarity. Default is the pairwise Pearson's correlation 
+#' @param is.decreasing A logical. TRUE if dist.func is similarity function to show greater value corresponds to greater similarity. FALSE if dist.func is dissimilarity.  
+#' @param d.func A function to convert the pairwise similarity to pairwise distance.  
+#' @param valid.gate Filtering method to identify significant clusters. "density" compares intra-cluster link density between parent and child clusters. "compact" compared compactness with the parent clusters. "both" uses "density" and "compact" filters simultaneously. Default is "both".
+#' @return Returns a list containing clustering results with optimal.modules (the final results from adapt split), resolution.tested (clustering resolution sweeped), resolution.used (the final value of clustering resolution), and module.table containing the compactness and intra-cluster connectivity stats.
+#' @export
+#' @examples 
+#'\donttest{
+#' data(simMix1)
+#' library(scater)
+#' library(scran)
+#' library(igraph)
+#' library(doParallel)
+#' qc.out = process_data(simMix1,do.impute = TRUE)
+#' 
+#' # add reduced dim
+#' reducedDim(qc.out$sce,"PCA.imputed") = calculatePCA(x = assay(qc.out$sce,"ALRA.logcounts"),subset_row = rownames(subset(qc.out$gene.data.alra,p.value < 0.05)))
+#' reducedDim(qc.out$sce,"UMAP.imputed") = calculateUMAP(x = qc.out$sce,dimred = "PCA.imputed")
+#' reducedDim(qc.out$sce,"tSNE.imputed") = calculateTSNE(x = qc.out$sce,dimred = "PCA.imputed")
+#' 
+#' plotReducedDim(qc.out$sce,dimred = "tSNE.imputed",colour_by = "phenoid")
+#' # for imputed data for correlation computation 
+#' dat = subset(qc.out$gene.data.alra,bio > 0 & p.value < 0.05)
+#' bcnt.alra = counts(qc.out$sce)[rownames(dat),]
+#' m.alra = as.matrix(assay(qc.out$sce,"ALRA.logcounts")[rownames(dat),])
+#' bcnt.alra[bcnt.alra > 1E-320] = 1
+#' msc.res = msc_workflow(dat = m.alra,bcnt = bcnt.alra,n.cores = 4)
+#' }
+msc_workflow <- function(dat,bcnt,n.cores = 4,min.cells = 5,
                                   sim.func = function(a, b) cor(a,b,method ="pearson"),is.decreasing = TRUE,
                                   d.func = function(x) sqrt(2*(1-x)),
                                   valid.gate = "both")
@@ -684,7 +996,7 @@ if (TRUE)
     gf = generate_cell_network.wt.loess(mat = dat,bcnt = bcnt,
                                         dist.func = sim.func,
                                         is.decreasing = is.decreasing,
-                                        min.size = min.cells,n.cores = n.cores)
+                                        n.cores = n.cores)
     
     ## Run iterative clustering
     # identify scale parameter
@@ -694,7 +1006,7 @@ if (TRUE)
       gc()
       
       iter.res = iterative_clustering.par(g.in = gf,min.size = min.cells,d.func = d.func,alpha = alpha.res,
-                                          min.width = 0.2,n.cores = n.cores,valid.gate = valid.gate)
+                                          n.cores = n.cores,valid.gate = valid.gate)
       gc()
       iter.res$cell.network = gf;
     }else{
@@ -706,12 +1018,21 @@ if (TRUE)
       gc()
       
       iter.res = iterative_clustering.par(g.in = gf,min.size = min.cells,d.func = d.func,alpha = alpha.res,
-                                          min.width = 0.2,n.cores = n.cores,valid.gate = valid.gate)
+                                          n.cores = n.cores,valid.gate = valid.gate)
     }
     iter.res$cell.network = gf;
     return(iter.res)
   }
-  
+
+#' Pruning cluster hierarchy
+#' 
+#' @description Quick filtering of module hierarchy tree to remove branches that do not anchor on the grand parent cluster, M0. 
+#' @docType package
+#' @param iter.res An output from iterative_clustering or iterative_clustering.par.
+#' @return Adds "prunted.table" into the input data. 
+#' @seealso [iterative_clustering()] or [iterative_clustering.par()] for the input. 
+#' @name prune_hierarchy.compact
+#' @export
   prune_hierarchy.compact <- function(iter.res)
   {
     ### prune parents for compactness gate
@@ -729,4 +1050,3 @@ if (TRUE)
     iter.res$pruned.table = sig.table
     return(iter.res)
   }
-}

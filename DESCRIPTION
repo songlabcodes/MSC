@@ -1,0 +1,12 @@
+Package: MSC
+Title: Single-cell multi-scale clustering
+Version: 0.1.0
+Authors@R: person("Won-Min", "Song", , "won-min.song@mssm.edu", role = c("aut", "cre"))
+Description: Given a cell-cell similarity measure, MSC package calculated locally embedded network (LEN) amongst the cells, and perform top-down iterative clustering to identify multi-scale clustering structures in single-cell transcriptome.
+License: GPL (>= 3)
+Imports: Rcpp (>= 1.0.11), MEGENA (>= 1.5.2), doParallel (>= 1.0.17), igraph (>= 1.4.2), rpart (>= 4.1.16), Matrix (>= 1.5-1), Seurat (>= 4.1.1), SingleCellExperiment (>= 1.18.0), scran (>= 1.24.0), scater (>= 1.24.0), ggrepel (>= 0.9.3), ggplot2 (>= 3.4.2)
+Depends: R (>= 4.2.0)
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.2.1
+LazyData: true

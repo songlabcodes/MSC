@@ -180,6 +180,15 @@ get_local_embedding_per_node <- function(v,mat,min.k = 3,max.k = 30,n_skip = 3,
                                          dist.func = function(a, b) sqrt(sum((a - b)^2)),
                                          is.decreasing = FALSE,verbose = FALSE)
 {
+  convert_mat_to_edgelist <- function(m)
+  {
+    ## quickly convert matrix to three column list
+    ij = do.call('rbind',lapply(1:(ncol(m)-1),function(x,n) {rr = rep(x);cc = (x+1):n;cbind(rr,cc)},n = ncol(m)));
+    colnames(ij) = c("ri","ci")
+    w = m[ij_to_lin(rr = ij[,1],cc = ij[,2],n = ncol(m))]
+    cbind(ij,w)
+  }
+  ij_to_lin <- function(rr,cc,n) n*(cc-1) + rr
 	idx = setdiff(1:ncol(mat),v)
 	
 	#rval = apply(mat[,idx],2,function(x,y) cor(x,y,method = method),y = mat[,v])
@@ -315,60 +324,6 @@ get_local_embedding_par <- function(mat,n.cores = 4,n_skip = 3,min.k = 4,max.k =
   return(out)
 }
 
-calculate_LEN <- function(mat,n.cores = 8,n_skip = 3,min.k = 4,max.k = 30,
-                          dist.func = function(a, b) sqrt(sum((a - b)^2)),is.decreasing = FALSE,
-                          verbose = FALSE)
-{
-	cat("###### Commence LEN calculation...\n")
-	cat("- Calculate local embedding...\n")
-	el = get_local_embedding_par(mat,n.cores = n.cores,n_skip = 3,min.k = 4,max.k = 30,
-	                             dist.func = dist.func,is.decreasing = is.decreasing,verbose = FALSE)
-
-	# symmetrize adjacency
-	adj = sparseMatrix(i = match(el$row,colnames(mat)),j = match(el$col,colnames(mat)),x = el$weight,dims = c(ncol(mat),ncol(mat)),dimnames = list(colnames(mat),colnames(mat)))
-	adj = adj + t(adj)		
-
-	
-	### get fractional ranking
-	cat("- Check mutual neighbor...\n")
-	is.mutual = is.duplicate = rep(FALSE,nrow(el))
-	for (i in 1:nrow(el))
-	{
-		if ((i %% 1000) == 0) cat(paste0("processed:",i,"/",nrow(el),"=",signif(i/nrow(el),3)*100,"%\n"))
-		ii = c()
-		if (!is.duplicate[i]) ii = which(el$row == el$col[i] & el$col == el$row[i])
-		if (length(ii) > 0) 
-		{
-			is.mutual[c(i,ii)] = TRUE
-			is.duplicate[ii] = TRUE
-		}
-	}
-	
-	# get jaccard index
-	cat("- Calculate mutual neighbor ratios...\n")
-	jac <-rep(NA,nrow(el))
-	for (i in 1:nrow(el))
-	{
-	  if ((i %% 1000) == 0) cat(paste0("processed:",i,"/",nrow(el),"=",signif(i/nrow(el),3)*100,"%\n"))
-	  
-	  vi = which(rownames(adj) == el$row[i])
-	  vj = which(rownames(adj) == el$col[i])
-	  
-	  veci = adj[vi,] > 1E-320
-	  vecj = adj[vj,] > 1E-320
-	  veci[c(vi,vj)] = TRUE
-	  vecj[c(vi,vj)] = TRUE
-	  jac[i] = sum(veci & vecj)/sum(veci | vecj,na.rm = TRUE)
-	}			  
-	el$Mutual.Neighbor.Ratio = jac;
-	
-
-	el$is.mutual = is.mutual
-	el$is.duplicate = is.duplicate
-
-	return(el)
-}
-
 # this version works on sparse count matrix to speed up the process
 calculate_LEN.v3 <- function(mat,bcnt,
                              do.par = TRUE,n.cores = 4,
@@ -419,9 +374,16 @@ calculate_LEN.v3 <- function(mat,bcnt,
   
   # Start the clock!
   ptm <- proc.time()
-  
+  convert_mat_to_edgelist <- function(m)
+  {
+    ## quickly convert matrix to three column list
+    ij = do.call('rbind',lapply(1:(ncol(m)-1),function(x,n) {rr = rep(x);cc = (x+1):n;cbind(rr,cc)},n = ncol(m)));
+    colnames(ij) = c("ri","ci")
+    w = m[ij_to_lin(rr = ij[,1],cc = ij[,2],n = ncol(m))]
+    cbind(ij,w)
+  }
   res <- foreach(ii = idx.lst,.packages = "MEGENA",
-                 .export = c("get_local_embedding_per_node","convert_mat_to_edgelist","ij_to_lin","ng.per.cell","min.k","max.k")) %dopar% {
+                 .export = c("get_local_embedding_per_node","ij_to_lin","ng.per.cell","min.k","max.k","dist.func")) %dopar% {
                    res.ijw = data.frame()
                    knn.f = c()
                    
@@ -447,7 +409,7 @@ calculate_LEN.v3 <- function(mat,bcnt,
   
   # symmetrize adjacency
   adj = sparseMatrix(i = match(el$row,colnames(mat)),j = match(el$col,colnames(mat)),x = el$weight,dims = c(ncol(mat),ncol(mat)),dimnames = list(colnames(mat),colnames(mat)))
-  adj = adj + t(adj)		
+  adj = adj + Matrix::t(adj)		
   
   ### get fractional ranking
   ptm <- proc.time()
@@ -549,7 +511,7 @@ calculate_LEN.v4 <- function(mat,
   
   # symmetrize adjacency
   adj = sparseMatrix(i = match(el$row,colnames(mat)),j = match(el$col,colnames(mat)),x = el$weight,dims = c(ncol(mat),ncol(mat)),dimnames = list(colnames(mat),colnames(mat)))
-  adj = adj + t(adj)		
+  adj = adj + Matrix::t(adj)		
   
   ### get fractional ranking
   cat("- Check duplicates...\n")
@@ -625,8 +587,48 @@ prune_edges <- function(dat.el,quantile.cut = 0.3)
   return(go)
 }
 
-generate_cell_network.wt.loess <- function(mat,bcnt,dist.func,is.decreasing,quantile.cut = 0.85,
-                                           min.size = 10,n.cores = 8)
+#' @title Perform locally embedded network (LEN) to calculate cell-cell similarity network
+#' @name generate_cell_network.wt.loess
+#' @description  Perform locally embedded network (LEN) to calculate cell-cell similarity network. 
+#' @param mat A log-normalized single-cell expression matrix (rows: genes, columns: cell).
+#' @param bcnt A binary matrix of genes (row) by cells (column). If expressed, \code{bcnt[i,j] = 1}, otherwise 0.   
+#' @param dist.func A function to calculate cell-cell similarity/dissimilarity. 
+#' @param is.decreasing A logical. TRUE if dist.func is similarity function to show greater value corresponds to greater similarity. FALSE if dist.func is dissimilarity.  
+#' @param n.cores An integer for the number of cores for parallelization 
+#' @return 
+#' A list containing the MSC results
+#' \describe{
+#'   \item{modules}{A list of cell clusters}
+#'   \item{module.table}{A data.frame containing cell cluster statistics (sizes, compactness, intra-cluster connectivity etc).}
+#'   \item{cell.network}{An igraph object containing the cell network}
+#'   \item{alpha.value}{The alpha parameter value used to calculate the cluster compactness}
+#'   \item{pruned.table}{Refined list of cell clusters after applying compactness and/or intra-cluster connectivity filters.}
+#' }
+#' @examples 
+#' \donttest{
+#' data(simMix1)
+#' 
+#' library(scater)
+#' library(scran)
+#' library(doParallel)
+#' qc.out = process_data(simMix1,do.impute = TRUE)
+#' 
+#' # add reduced dim
+#' reducedDim(qc.out$sce,"PCA.imputed") = calculatePCA(x = assay(qc.out$sce,"ALRA.logcounts"),subset_row = rownames(subset(qc.out$gene.data.alra,p.value < 0.05)))
+#' reducedDim(qc.out$sce,"UMAP.imputed") = calculateUMAP(x = qc.out$sce,dimred = "PCA.imputed")
+#' reducedDim(qc.out$sce,"tSNE.imputed") = calculateTSNE(x = qc.out$sce,dimred = "PCA.imputed")
+#' 
+#' plotReducedDim(qc.out$sce,dimred = "tSNE.imputed",colour_by = "phenoid")
+
+#' # for imputed data for correlation computation 
+#' dat = subset(qc.out$gene.data.alra,bio > 0 & p.value < 0.05)
+#' bcnt.alra = counts(qc.out$sce)[rownames(dat),]
+#' m.alra = as.matrix(assay(qc.out$sce,"ALRA.logcounts")[rownames(dat),])
+#' bcnt.alra[bcnt.alra > 1E-320] = 1
+#' g.len = generate_cell_network.wt.loess(mat = m.alra,bcnt = bcnt.alra,dist.func = function(a, b) cor(a,b,method ="pearson"),is.decreasing = TRUE,n.cores = 4)
+#' }
+#' @export
+generate_cell_network.wt.loess <- function(mat,bcnt,dist.func,is.decreasing,n.cores = 8)
 {
   require(rpart)
   # get network

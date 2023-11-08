@@ -3,235 +3,6 @@ get_module_label_coord <- function(coord,mods)
 {
 	do.call('rbind',lapply(mods,function(x,y) apply(y[match(x,rownames(y)),],2,function(q) median(q,na.rm = T)),y = coord))
 }
-create_pseudobulk_per_cluster <- function(seur,mods,group.var,
-                                          assay.name = "RNA")
-{
-  require(Matrix.utils)
-  vec.c = rep(NA,length(mods))
-  for (m in 1:length(mods)) vec.c[colnames(seur) %in% mods[[m]]] = names(mods)[m]
-  seur@meta.data$msc_clusters = vec.c
-  
-  groups = seur@meta.data[,c("msc_clusters",group.var)]
-  pb <- aggregate.Matrix(t(GetAssayData(seur[[assay.name]],slot = "counts")), 
-                         groupings = groups, fun = "sum") 
-  
-  pb = t(pb)
-  pb = pb[,which(colnames(pb) != "NA")]
-  #pb = pb + 1
-  
-  # remove unexpressed genes
-  ii = which(rowSums(pb < 1E-320,na.rm = TRUE) < ceiling(ncol(pb)*0.8))
-  pb = pb[ii,]
-  print(dim(pb))
-  
-  # create sample meta data
-  sample.meta = data.frame(id = colnames(pb),cluster.id = factor(gsub("_(.*)$","",colnames(pb))),sample.id = factor(gsub("^(.*)_","",colnames(pb))))
-  
-  return(list(pseudobulk = pb,meta = sample.meta))
-}
-
-
-find_pseudobulk_markers <- function(count.mat,meta,
-                                    seur,modules,
-                                    assay.name = "RNA",
-                                    pval.cut = 0.05,fc.cut = 1.2,
-                                    do.par = FALSE,n.cores = 8)
-{
-  # count.mat = count matrix in sparse format, meta = data frame with columns "cluster.id" and "sample.id". 
-  dds <- tryCatch(DESeqDataSetFromMatrix(count.mat, colData = meta, design = ~ 0  + cluster.id + sample.id),error = function(e) return(NA))
-  
-  # Run DESeq2 differential expression analysis
-  if (do.par) 
-  {
-    gc()
-    mc.param = MulticoreParam(workers = n.cores)
-    register(mc.param)
-    dds.o <- tryCatch(DESeq(dds,parallel = TRUE,BPPARAM = mc.param),error = function(e) return(NA))
-    if (any(is.na(dds.o)) )
-    {
-      dds = DESeq(dds,parallel = TRUE,fitType = "mean",BPPARAM = mc.param)
-    }else{
-      dds = dds.o
-    }
-    rm(dds.o)
-  }
-  
-  if (!do.par) 
-  {
-    
-    dds.o <- tryCatch(DESeq(dds),error = function(e) return(NA))
-    if (any(is.na(dds.o)) )
-    {
-      dds = DESeq(dds,fitType = "mean")
-    }else{
-      dds = dds.o
-    }
-    rm(dds.o)
-  }
-  gc()
-  # extract results for genotype comparison
-  cls.var = resultsNames(dds);
-  cls.var = cls.var[grep("^cluster.id",cls.var)]
-  print(gsub("cluster.id","",cls.var))
-  
-  if (!do.par)
-  {
-    cluster.res = vector("list",length(cls.var))
-    names(cluster.res) = gsub("cluster.id","",cls.var)
-    for (j in 1:length(cls.var))
-    {
-      case = cls.var[j];ctrl = cls.var[-j]
-      res = results(dds,contrast = list(case,ctrl),listValues = c(1,-1/length(ctrl)))
-      res <- lfcShrink(dds,contrast = list(case,ctrl),res=res,type = "ashr")
-      
-      # call results
-      res$gene.name = rownames(res)
-      res$case.group = rep(gsub("cluster.id","",case),nrow(res))
-      res$ctrl.group = rep(paste(gsub("cluster.id","",ctrl),collapse= ","),nrow(res))
-      
-      # call DEG
-      deg = rep(NA,nrow(res))
-      deg[res$log2FoldChange > log2(fc.cut) & res$padj < pval.cut] = "UP"
-      deg[res$log2FoldChange < -log2(fc.cut) & res$padj < pval.cut] = "DN"
-      res$DEG.ID = deg;
-      
-      # add percent expressed
-      m = GetAssayData(seur,assay= assay.name,slot = "counts")
-      cc = which(colnames(m) %in% modules[gsub("^cluster.id","",cls.var[j])][[1]])
-      cc.not = which(!(colnames(m) %in% modules[gsub("^cluster.id","",cls.var[j])][[1]]))
-      m.in = m[match(res$gene.name,rownames(m)),cc]
-      m.not = m[match(res$gene.name,rownames(m)),cc.not]
-      
-      res$pct.case = rowSums(m.in > 1E-320,na.rm = TRUE)/ncol(m)
-      res$pct.ctrl = rowSums(m.not > 1E-320,na.rm = TRUE)/ncol(m)
-      #res$parent.module = rep(vr[i],nrow(res))
-      cluster.res[[j]] = res
-      
-      rm(m,cc,cc.not,m.in,m.not,deg,case,ctrl)
-    }
-  }else{
-    require(foreach)
-    require(iterators)
-    require(doParallel)
-    if (getDoParWorkers() < n.cores) 
-    {
-      # remove pre-registered nodes to make sure it runs clean.
-      if (getDoParWorkers() > 1)
-      {
-        env <- foreach:::.foreachGlobals
-        rm(list = ls(name = env),pos = env)
-      }
-      cl <- parallel::makeCluster(n.cores)
-      doParallel::registerDoParallel(cl)
-    }
-    cluster.res = foreach(j=1:length(cls.var),.packages = c("DESeq2","Seurat") ) %dopar% {
-      case = cls.var[j];ctrl = cls.var[-j]
-      res = results(dds,contrast = list(case,ctrl),listValues = c(1,-1/length(ctrl)))
-      res <- lfcShrink(dds,contrast = list(case,ctrl),res=res,type = "ashr")
-      
-      # call results
-      res$gene.name = rownames(res)
-      res$case.group = rep(gsub("cluster.id","",case),nrow(res))
-      res$ctrl.group = rep(paste(gsub("cluster.id","",ctrl),collapse= ","),nrow(res))
-      
-      # call DEG
-      deg = rep(NA,nrow(res))
-      deg[res$log2FoldChange > log2(fc.cut) & res$padj < pval.cut] = "UP"
-      deg[res$log2FoldChange < -log2(fc.cut) & res$padj < pval.cut] = "DN"
-      res$DEG.ID = deg;
-      
-      # add percent expressed
-      m = GetAssayData(seur[[assay.name]],slot = "counts");
-      
-      cc = which(colnames(m) %in% modules[gsub("^cluster.id","",cls.var[j])][[1]])
-      cc.not = which(!(colnames(m) %in% modules[gsub("^cluster.id","",cls.var[j])][[1]]))
-      m.in = m[match(res$gene.name,rownames(m)),cc]
-      m.not = m[match(res$gene.name,rownames(m)),cc.not]
-      
-      res$pct.case = rowSums(m.in > 1E-320,na.rm = TRUE)/ncol(m)
-      res$pct.ctrl = rowSums(m.not > 1E-320,na.rm = TRUE)/ncol(m)
-      #res$parent.module = rep(vr[i],nrow(res))
-      return(res)
-    }
-    names(cluster.res) = gsub("cluster.id","",cls.var)
-    #stopCluster(cl)
-    gc()
-  }
-  return(cluster.res)
-  
-}
-
-pseudobulk_markers <- function(seu,
-modules,htbl,root.module,
-# seurat marker params
-pval.cut = 0.05,fc.cut = 1.2,
-assay.name = "SCT",group.var = "individualID",
-# parallelize param
-do.par = TRUE,n.cores = 8)
-{
-	require(Matrix.utils)
-	require(DESeq2)
-	require(BiocParallel)
-	require(dplyr)
-	require(magrittr)
-	
-	vr = c(root.module)
-	niter = 1
-	marker.res = DataFrame()
-	do.run = TRUE
-	while (do.run)
-	{
-		vr.new = c()
-		cat(paste0("iter. #",niter,"\n"))
-		cat(paste0("- root modules:",paste(vr,collapse = ","),"\n"))
-		for (i in 1:length(vr))
-		{
-			mids = subset(htbl,module.parent == vr[i])$module.id
-			if (length(mids) > 1)
-			{
-				cat(paste0("-- ",vr[i]," child modules:",paste(mids,collapse = ","),"\n"))
-				mr = modules[[which(names(modules) == vr[i])]]
-				mc = modules[match(mids,names(modules))]
-				seur = seu[,match(mr,colnames(seu))];
-				
-				if (length(mc) > 1)
-				{
-				  ## First, aggregate cell-level to sample-level data
-				  cat("-- Pseudobulk matrix generation...\n")
-				  
-				  pseudo.dat = create_pseudobulk_per_cluster(seur,mods = mc,group.var = group.var,assay.name = assay.name)
-				  cluster.res = find_pseudobulk_markers(count.mat = pseudo.dat$pseudobulk,meta = pseudo.dat$meta,
-				                                        seur = seur,modules = mc,
-				                                        assay.name = assay.name,
-				                                        pval.cut = pval.cut,fc.cut = fc.cut,
-				                                        do.par = do.par,n.cores = n.cores)
-				  # update to marker results
-				  marker.res = rbind(marker.res,do.call('rbind.DataFrame',cluster.res))
-				  
-				}
-				
-				rm(seur)
-				gc()
-			}
-			
-			vr.new = c(vr.new,mids[mids %in% htbl$module.parent])
-		}
-		
-		# update root directory
-		if (length(vr.new) > 0)
-		{
-			do.run = TRUE
-			vr = vr.new
-			niter = niter + 1
-			rm(vr.new)
-		}else{
-			do.run = FALSE
-		}
-	}
-
-	return(marker.res)
-}
-
 
 ### marker dot plot in hierarchy format
 plot_hierarchy_dot <- function(seu,htbl,modules,celltype.markers,assay.name = "RNA",pct.mark = 0.1,
@@ -571,6 +342,25 @@ plot_dimred_manual <- function(seu.obj,dimred = "umap",category.name,cls.col = N
 	return(pobj)
 }
 
+#' @title Generate dimension reduction plot.   
+#' @name plot_dimred_manual.raw
+#' @description  Generated ggplot object to show 2-dimensional dimension reduction plot 
+#' @param xy Two column matrix, where each row is the cartesian coordinate for a cell. 
+#' @param cell.feat A named factor vector for cell group assignments. 
+#' @param alpha.val A numeric from 0 to 1 to specific dot transparency. 
+#' @param cls.col A named character vector to specify colors for the groups in "cell.feat".
+#' @param add.labels A logical. If TRUE, adds labels to the groups. 
+#' @param label.size If add.labels = TRUE, then label.size specifies the label font size in the plot. 
+#' @param is.repel A logical. If TRUE, uses [geom_text_repel()] from ggrepel package to add the labels.
+#' @param is.root A logical vector. Each specify if each cell belongs to the parent cluster of interest. 
+#' @return Returns a named vector of cluster membership.
+#' @examples 
+#' cell.names = letters[1:10]
+#' xy =  matrix(runif(20,0,1),ncol = 2);rownames(xy) = cell.names
+#' cell.feat= factor(c(rep("A",5),rep("B",5)));names(cell.feat) = cell.names
+#' plot_dimred_manual.raw(xy,cell.feat,alpha.val = 1)
+#' @export
+
 plot_dimred_manual.raw <- function(xy,cell.feat,alpha.val = 0.1,cls.col = NULL,add.labels = TRUE,label.size = 5,is.repel = FALSE,is.root = NULL)
 {
   require(RColorBrewer)
@@ -617,6 +407,21 @@ plot_dimred_manual.raw <- function(xy,cell.feat,alpha.val = 0.1,cls.col = NULL,a
   }
   return(pobj)
 }
+
+#' @title Get child cluster membership vector  
+#' @name get_rooted_membership
+#' @description  Anchored onto a parent cluster, child cluster membership vector is calculated 
+#' @param mtbl A data.frame object, for the cluster information table. Can be obtained from module.table or pruned.table slot in output from [iterative_clustering.par()]. 
+#' @param modules A named list object. Each is the character vector of cells from a cell cluster. 
+#' @param pid A character value for the parent cluster. The respective child cluster will be identified from mtbl. 
+#' @param bg A character vector containing the full list of cell names.
+#' @return Returns a named vector of cluster membership.
+#' @examples 
+#' data(pbmc_8k_msc_results)
+#' library(igraph)
+#' mem.vec = get_rooted_membership(mtbl = pbmc_8k_msc_results$pruned.table,modules = pbmc_8k_msc_results$modules,pid = "M2",bg = V(pbmc_8k_msc_results$cell.network)$name)
+#' table(mem.vec)
+#' @export
 
 get_rooted_membership <- function(mtbl,modules,pid,bg)
 {

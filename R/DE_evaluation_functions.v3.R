@@ -1,7 +1,3 @@
-library(DESeq2)
-library(Matrix.utils)
-library(Matrix)
-library(doParallel)
 
 ### marker functions
 annotate_conserved_markers <- function(marker.list,pval.cutoff = 0.05,fc.cutoff = 1.2,pct.1.cutoff = 0.25,pct.diff.cutoff = 0.1)
@@ -119,6 +115,7 @@ run_conserved_markers.par <- function(obj,find.conserved = TRUE,
         out = try(FindMarkers(object = obj,assay = assay.name,ident.1 = k.idx[k],test.use = DE.method,
                               recorrect_umi = recorrect_umi,
                               logfc.threshold = lfc.cutoff,min.cells.group = 10));
+        
         if(!inherits(out, 'try-error'))  
         {
           out$gene.name = rownames(out)
@@ -138,6 +135,55 @@ run_conserved_markers.par <- function(obj,find.conserved = TRUE,
   return(marker.list.annot)
 }
 
+#' @title Perform hierarchical cluster marker detection 
+#' @name run_hierarchical_markers.par
+#' @description  Wrapper of FindMarkers() function in Seurat to perform marker detection comparing child clusters, derived from their parent cluster. 
+#' @param obj.o A Seurat object.
+#' @param mtbl A data.frame for MSC module table, capturing child and parent cluster (mtbl$parent.cluster) relationship.
+#' @param modules A list object holding the list of cell names as a cell cluster in each.   
+#' @param grp.var Column name in Seurat meta data, designating sample assignments.
+#' @param cls.var Column name in Seurat meta data, designating child cluster assignments. "msc.cluster" is the default, and this column is created within this function to evaluate each split per parent cluster. 
+#' @param find.conserved A logical. If TRUE, conserved markers across samples specific in "grp.var" column are calculated. 
+#' @param DE.method Differential expression test method, as specified in [FindMarkers()] in Seurat package.
+#' @param lfc.cutoff log2 fold change cutoff. Default is log2(1.2).
+#' @param assay.name Seurat assay name to perform the marker analysis.
+#' @param min.size An integer to specify the minumum cluster size to compute the markers. 
+#' @param recorrect.SCT A logical. If TRUE, perform PrepSCTFindMarkers() to re-scale the data across different samples specific in "grp.var". 
+#' @param n.cores An integer for the number of cores for parallelization 
+#' @return Returns a named list. Each element contains a data.frame for list of markers per the named cluster.
+#' @examples
+#' \donttest{
+#' data(simMix1)
+#' 
+#' library(scran)
+#' library(igraph)
+#' library(doParallel)
+#' qc.out = process_data(simMix1,do.impute = TRUE)
+#' 
+#' # add reduced dim
+#' reducedDim(qc.out$sce,"PCA.imputed") = calculatePCA(x = assay(qc.out$sce,"ALRA.logcounts"),subset_row = rownames(subset(qc.out$gene.data.alra,p.value < 0.05)))
+#' reducedDim(qc.out$sce,"UMAP.imputed") = calculateUMAP(x = qc.out$sce,dimred = "PCA.imputed")
+#' reducedDim(qc.out$sce,"tSNE.imputed") = calculateTSNE(x = qc.out$sce,dimred = "PCA.imputed")
+#' 
+#' plotReducedDim(qc.out$sce,dimred = "tSNE.imputed",colour_by = "phenoid")
+#' 
+#' dat = subset(qc.out$gene.data.alra,bio > 0 & p.value < 0.05)
+#' bcnt.alra = counts(qc.out$sce)[rownames(dat),]
+#' m.alra = as.matrix(assay(qc.out$sce,"ALRA.logcounts")[rownames(dat),])
+#' bcnt.alra[bcnt.alra > 1E-320] = 1
+#' msc.res = msc_workflow(dat = assay(qc.out$sce,"ALRA.logcounts"),bcnt = bcnt.alra,n.cores = 4)
+#' msc.res = prune_hierarchy.compact(msc.res)
+#' 
+#' ## conversion to Seurat object
+#' library(Seurat)
+#' seu = CreateSeuratObject(counts = counts(qc.out$sce),project = "simMix1",meta.data = as.data.frame(colData(qc.out$sce)))
+#' seu@assays$RNA@data = assay(qc.out$sce,"ALRA.logcounts")
+#' 
+#' msc.marker.list = run_hierarchical_markers.par(obj.o = seu,mtbl = msc.res$pruned.table,
+#' modules = msc.res$modules,grp.var = "orig.ident",cls.var = "msc.cluster",find.conserved = FALSE,assay.name = "RNA",recorrect.SCT = FALSE,
+#' DE.method = "wilcox",n.cores = 4)
+#' }
+#' @export
 run_hierarchical_markers.par <- function(obj.o,mtbl,modules,grp.var,cls.var = "msc.cluster",
                                          find.conserved = FALSE,assay.name = "SCT",recorrect.SCT = FALSE,
                                          DE.method = "MAST",lfc.cutoff = log2(1.2),
@@ -166,7 +212,9 @@ run_hierarchical_markers.par <- function(obj.o,mtbl,modules,grp.var,cls.var = "m
   {
     cat(paste0("processing parent cluster:",parent.cls[i],"\n"));
     
-    obj = subset(obj.o,cells = modules[parent.cls[i]][[1]])
+    #
+    selected <- WhichCells(obj.o,cells = modules[parent.cls[i]][[1]])
+    obj = subset(obj.o,cells = selected)
     print(dim(obj))
     
     # get subclusters
@@ -189,4 +237,40 @@ run_hierarchical_markers.par <- function(obj.o,mtbl,modules,grp.var,cls.var = "m
     gc()
   }
   return(marker.results)
+}
+
+get_dotplot_pdata <- function(genes,cnt,mat,grp,cls)
+{
+  # genes =list of gene names for plotting
+  # cnt = count matrix
+  # mat = normalized expression matrix
+  # grp = character vector specifying group assignments for cells (e.g. case / control) 
+  # cls = character vector specifying cluster assignments for cells
+  gv = unique(grp)
+  cv = unique(cls)
+  
+  nc <- grp.vec <- cls.vec <- pct.expr <- mean.expr <- gene.name <- c() 
+  for (i in 1:length(genes))
+  {
+    cnt.g = as.vector(cnt[match(genes[i],rownames(cnt)),]);names(cnt.g) = colnames(cnt)
+    mat.g = as.vector(mat[match(genes[i],rownames(mat)),]);names(mat.g) = colnames(mat)
+    for (n in 1:length(gv))
+    {
+      for (m in 1:length(cv))
+      {
+        ii = which(grp == gv[n] & cls == cv[m])
+        if (length(ii) > 0)
+        {
+          nc = c(nc,length(ii))
+          gene.name <- c(gene.name,genes[i])
+          grp.vec <- c(grp.vec,gv[n])
+          cls.vec <- c(cls.vec,cv[m])
+          pct.expr <- c(pct.expr,sum(cnt.g[ii] > 1E-320,na.rm = T)/length(ii) * 100)
+          mean.expr <- c(mean.expr,mean(mat.g[ii]))
+        }
+      }
+    }
+  }
+  out = data.frame(gene.name = gene.name,group.name = grp.vec,cluster.name = cls.vec,pct.express = pct.expr,mean.express = mean.expr,num.cell = nc)
+  return(out)
 }
