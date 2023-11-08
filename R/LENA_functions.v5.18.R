@@ -1,83 +1,3 @@
-library(doParallel)
-library(igraph)
-library(MEGENA)
-library(Matrix)
-library(SingleCellExperiment)
-library(scater)
-library(scran)
-
-run_sce_qc_basic <- function(sce,outf,
-                             mt.val = 20,min.gene = 100,min.cells = 5,check.spike = FALSE,gene.name.col = "gene.symbol")
-{
-  cat("Starting QC...\n")
-  print(dim(sce))
-  require(scater)
-  #sce <- calculateQCMetrics(sce,use_spikes = TRUE,feature_controls=list(Mt=rowData(sce)$is.mito)) 
-  sce <- addPerCellQC(sce, subsets=list(Mito=which(rowData(sce)$is.mito)))
-  sce <- addPerFeatureQC(sce)
-  
-  pdf(file = paste(outf,".library_QC.pdf",sep = ""),width = 7,height = 5);
-  par(mfrow=c(2,2), mar=c(5.1, 4.1, 0.1, 0.1))
-  hist(sce$total/1e3, xlab="Library sizes (thousands)", main="", 
-       breaks=20, col="grey80", ylab="Number of cells")
-  hist(sce$detected, xlab="Number of expressed genes", main="", 
-       breaks=20, col="grey80", ylab="Number of cells")
-  hist(sce$subsets_Mito_percent, xlab="Mitochondrial proportion (%)", ylab="Number of cells", breaks=20, main="", col="grey80")
-  if (check.spike) hist(sce$pct_counts_Spike, xlab="ERCC proportion (%)",ylab="Number of cells", breaks=20, main="", col="grey80") # drop spike in QC
-  dev.off()
-  
-  cat("Drop poor quality cells and features...\n")
-  # some things to drop
-  libsize.drop <- isOutlier(sce$total, nmads=3, type="lower", log=TRUE)
-  feature.drop <- isOutlier(sce$detected, nmads=3, type="lower", log=FALSE);
-  Mt.drop <- sce$subsets_Mito_percent > mt.val | isOutlier(sce$subsets_Mito_percent, nmads=3, type="higher", log=FALSE);
-  spike.drop = rep(FALSE,ncol(sce))
-  if (check.spike) spike.drop <- isOutlier(sce$pct_counts_Spike, nmads=3, type="higher")
-  gene.drop = colData(sce)$detected < min.gene
-  
-  cell.drop = rowData(sce)$detected < (min.cells/ncol(sce) * 100)
-    
-  sce <- sce[!(cell.drop),!(libsize.drop | feature.drop | spike.drop | Mt.drop | gene.drop)]
-  
-  data.frame(Cell.ByLibSize=sum(libsize.drop),Gene.ByFeature=sum(feature.drop),Cell.BySpike=sum(spike.drop),Cell.ByMt = sum(Mt.drop),Cell.ByGeneNumber = sum(gene.drop),
-  Gene.ByCell = sum(cell.drop),Remaining.Cell=ncol(sce),Remaining.Gene = nrow(sce))
-  
-  cat("Plot out high-expression genes...\n")
-  # show highest expressions
-  pdf(file = paste(outf,".highexpr.pdf",sep = ""),width = 5,height = 10);
-  print(plotHighestExprs(sce,  n=25, feature_names_to_plot = gene.name.col))
-  dev.off()
-  
-  # use size factor calculation for normalization
-  if (check.spike)
-  {
-	cat("Calculate size factors based on spike-ins...\n")
-	# based on spike ins
-	  sf.val <- computeSpikeFactors(sce, type="Spike", general.use=TRUE,sf.out = TRUE)
-	  
-	  if (any(sf.val < 1E-320)) sce = sce[,sf.val > 1E-320];
-	  
-	  sce = computeSpikeFactors(sce, type="Spike", general.use=TRUE,sf.out = FALSE)
-	  
-	  clusters <- quickCluster(sce)
-	  
-  }else{
-    cat("Calculate size factors based on clusters...\n")
-	clusters <- quickCluster(sce)
-	sce <- computeSumFactors(sce, clusters=clusters)
-	summary(sizeFactors(sce))
-  }
-  
-  sce$cluster.quick = clusters
-  
-  # normalize 
-  cat("Normalize...\n")
-  sce <- logNormCounts(sce,log = FALSE)
-  
-  return(sce)
-}
-
-
 load_mtx <- function(mtx.folder,mat.path = NULL,feat.path = NULL,bar.path = NULL,is.gzip = FALSE)
 {
   require(Matrix)
@@ -135,8 +55,6 @@ load_mtx <- function(mtx.folder,mat.path = NULL,feat.path = NULL,bar.path = NULL
   return(output)
   
 }
-
-
 
 ij_to_lin <- function(rr,cc,n) n*(cc-1) + rr
 
