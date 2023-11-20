@@ -9,4 +9,4 @@ library(devtools);
 install_github("songlabcodes/MSC");
 
 **Vignettes**  
-[PBMC 8k example](https://songlabcodes.github.io/MSC/vignettes/8k PBMC workflow.html): This contains the overall MSC workflow from data pre-processing, clustering, marker identification to visualization of the results.
+[PBMC 8k example](http://htmlpreview.github.io/?https://github.com/songlabcodes/MSC/blob/main/vignettes/8k_PBMC_Example.html): This contains the overall MSC workflow from data pre-processing, clustering, marker identification to visualization of the results.
