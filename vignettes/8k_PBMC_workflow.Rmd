@@ -1,0 +1,364 @@
+---
+title: "8k PBMC Example"
+author: "Won-Min Song"
+date: '2023-11-16'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### MSC workflow Vignette with 8k PBMC data set
+
+This is a MSC workflow vignette using 8k PBMC single-cell RNA-seq data. The raw count data can be downloaded from <https://www.synapse.org/#!Synapse:syn52966803>. The downloaded data should be placed under folder named "Data/pbmc_8k", rooted on the working directory of choice. To save time, the processed data can also be downloaded from <https://www.synapse.org/#!Synapse:syn53009488>, and placed under "pbmc_8k" folder. This will bypass from [Section 1](#S1) to [Section 3](#S3).
+
+Overall, the vignette is organized as follows:\
+[Section 1. Loading the data into SingleCellExperiment object](#S1);\
+[Section 2. Pre-processing](#S2);\
+[Section 3. Conversion to seurat object](#S3);\
+[Section 4. MSC workflow](#S4);\
+[Section 5. Hierarchical cell cluster marker identification](#S5);\
+[Section 6. Hierarchical visualization of markers](#S6);\
+[Section 7. Cell type annotations using SingleR](#S7);\
+[Section 8. Visualize MSC results using various tools](#S8);\
+[Section 9. Hierarchical cluster respresentation with piecharts](#S9).
+
+## [Section 1. Loading the data into SingleCellExperiment object]{#S1}
+
+```{r data loading,message=FALSE}
+rm(list = ls())
+library(SingleCellExperiment)
+library(ALRA)
+library(doParallel)
+library(igraph)
+library(MEGENA)
+library(Matrix)
+library(ggraph)
+library(scater)
+library(scran)
+library(MSC)
+
+#### Set up folders
+out.dir = "pbmc_8k";dir.create(out.dir) # set up output folders
+
+#### set-up parameters
+mt.val <- 20 # mitochondrial proportion %
+min.count = 5 # minimum sum count to have a gene as valid across the whole cells
+min.gene = 100 # minumum number of genes to be expressed per cell
+min.cell = 5 # minimum number of cells showing expression for a gene to be valid
+n.cores = 4 # number of cores to parallelize
+
+min.cells = 10; # minimum cell cluster size
+bio.cutoff = 0; # threshold to filter significant genes with biological variances as modeled from mean-variance fitting
+pval.cutoff = 0.05; # p-value threshold to get significant overall gene variances. 
+
+#### load matrix 
+sc.data = load_mtx(mtx.folder  = NULL,
+                   mat.path = "Data/pbmc_8k/matrix.mtx",
+                   feat.path = "Data/pbmc_8k/genes.tsv",
+                   bar.path = "Data/pbmc_8k/barcodes.tsv",
+                   is.gzip = FALSE)
+colnames(sc.data$gene.features)[1:2] = c("gene.name","gene.symbol")
+sc.data$gene.matrix = as(sc.data$gene.matrix,"CsparseMatrix")
+  
+# make SingleCellExperiment object
+sce = SingleCellExperiment(assays = list(counts = sc.data$gene.matrix))
+  
+# update rowdata for main data
+rowData(sce) = sc.data$gene.features[,1:2]
+is.mito = grepl("^MT-|^Mt-|^mt-",rowData(sce)$gene.symbol)
+rowData(sce)$is.mito = is.mito
+  
+# update rownames wiwth gene symbols
+rownames(sce) = paste0(sc.data$gene.features[[2]],"|",sc.data$gene.features[[1]])
+sce <- addPerCellQC(sce, subsets=list(Mito=which(rowData(sce)$is.mito)))
+
+```
+
+## [Section 2. Pre-processing]{#S2}
+
+```{r data pre-processing,message=FALSE}
+
+# process_data() is wrapper to perform feature extraction, dimension reduction and imputation: Note that imputation takes some time to finish (~ 5 min). Optionally, one may choose to skip the imputation by setting do.impute = FALSE, and this is highly recommended for data sets with > 10000 cells. 
+
+outfile = paste0(out.dir,"/SCE.standardized_QC.RDS") # filename to save
+if (!file.exists(outfile))
+{
+  qc.out = process_data(sce,do.impute = TRUE)
+      
+  reducedDim(qc.out$sce,"PCA.imputed") = calculatePCA(x = assay(qc.out$sce,"ALRA.logcounts"),subset_row = rownames(subset(qc.out$gene.data.alra,p.value < 0.05)))
+  reducedDim(qc.out$sce,"UMAP.imputed") = calculateUMAP(x = qc.out$sce,dimred = "PCA.imputed")
+  reducedDim(qc.out$sce,"tSNE.imputed") = calculateTSNE(x = qc.out$sce,dimred = "PCA.imputed")
+  
+  plotReducedDim(qc.out$sce,dimred = "tSNE.imputed")
+  
+  # save qc'ed results into the output directory
+  if (!file.exists(outfile)) saveRDS(qc.out,file = outfile)
+  
+}else{
+  qc.out = readRDS(outfile)
+}
+rm(sce)
+gc()
+```
+
+## [Section 3. Conversion to seurat object]{#S3}
+
+Conversion between SingleCellExperiment and Seurat objects is often needed, as these are the two schools of broadly used single-cell data containers in R.
+
+```{r SCE to Seurat conversion,message=FALSE,echo = FALSE}
+# output file for seurat object
+outfile = paste0(out.dir,"/SEU.standardized_QC.RDS")
+
+# check if the output file is saved
+if (!file.exists(outfile))
+{
+  library(Seurat)
+  seu = CreateSeuratObject(counts = counts(qc.out$sce),project = "pbmc8k",meta.data = as.data.frame(colData(qc.out$sce)))
+  seu[["RNA"]]@data = logcounts(qc.out$sce)
+  seu[["RNA"]]@scale.data = assay(qc.out$sce,"ALRA.logcounts")
+    
+  # Create DimReduc and add to object
+  xy = reducedDim(qc.out$sce,"PCA.imputed")
+  seu[['PCA']] <- CreateDimReducObject(embeddings = xy, key = "PCA_", global = T, assay = "RNA")
+    
+  xy = reducedDim(qc.out$sce,"UMAP.imputed")
+  seu[['UMAP']] <- CreateDimReducObject(embeddings = xy, key = "UMAP_", global = T, assay = "RNA")
+    
+  xy = reducedDim(qc.out$sce,"tSNE.imputed")
+  seu[['tSNE']] <- CreateDimReducObject(embeddings = xy, key = "tSNE_", global = T, assay = "RNA")
+  rm(xy)
+  
+  # save converted seurat object
+  if (!file.exists(outfile)) saveRDS(seu,file = paste0(out.dir,"/SEU.standardized_QC.RDS"))
+
+}else{
+  seu = readRDS(outfile)
+}
+
+```
+
+## [Section 4. MSC workflow]{#S4}
+
+MSC workflow can be run using the wrapper "msc_workflow()".
+
+```{r MSC: run the wrapper,message=FALSE}
+
+outfile = paste0(out.dir,"/MSC_results.from_correlation.RDS")
+
+if (!file.exists(outfile))
+{
+  # Register cores
+  if (getDoParWorkers() == 1 & n.cores > 1 & !(n.cores == getDoParWorkers()))
+  {
+    cl <- parallel::makeCluster(n.cores)
+    registerDoParallel(cl)
+    cat(paste0(getDoParWorkers()," cores have been registered.\n"))
+  }
+  
+  ## Prepare inputs for MSC: log-normalized data (dat), and binarized count matrix (bcnt.alra).
+  # get imputed data for correlation computation 
+  gene.data = qc.out$gene.data.alra
+  dat = subset(gene.data,bio > bio.cutoff & p.value < pval.cutoff) # use thresholds to get the features.
+  bcnt.alra = counts(qc.out$sce)[rownames(dat),]
+  m.alra = as.matrix(assay(qc.out$sce,"ALRA.logcounts")[rownames(dat),])
+  bcnt.alra[bcnt.alra > 1E-320] = 1
+  
+  ## Run the msc_workflow() wrapper function to execute MSC workflow. 
+  iter.res = msc_workflow(dat = m.alra,bcnt = bcnt.alra,n.cores = n.cores,min.cells = min.cells, valid.gate = "both")
+  iter.res = prune_hierarchy.compact(iter.res)
+  
+  saveRDS(iter.res,file = outfile)
+  rm(qc.out,bcnt.alra,dat,m.alra)
+  gc()
+}else{
+  iter.res = readRDS(outfile)
+}
+
+# probe cluster hierarchy to identify the main root cluster. 
+do.probe = TRUE
+mo = "M0"
+while (do.probe)
+{
+  tbl = subset(iter.res$module.table,parent.cluster == mo & module.size >= min.cells)
+  if (nrow(tbl) > 1) 
+  {
+    do.probe = FALSE
+  }else{
+    mo = tbl$cluster.name[1]
+  }
+}
+iter.res$root.cluster = mo
+
+```
+
+## [Section 5. Hierarchical cell cluster marker identification]{#S5}
+
+Here, we utilize the cell cluster hierarchy to identify cluster markers, comparing child clusters within each parent cluster. In this way, each cluster is compared within the hierarchy branch, instead of being compared against all of the other cells.
+
+```{r marker detection,message = FALSE}
+outfile = paste0(out.dir,"/msc_marker_results.RDS")
+
+if (!file.exists(outfile))
+{
+  ### calculate multi-scale cluster markers: Clusters are compared within 
+  rownames(seu@assays$RNA@counts) = rownames(seu@assays$RNA@data)
+  msc.marker.list = run_hierarchical_markers.par(obj.o = seu,mtbl = iter.res$module.table,
+                                                 modules = iter.res$modules,
+                                                 grp.var = "orig.ident",cls.var = "msc.cluster",
+                                                 find.conserved = FALSE,assay.name = "RNA",recorrect.SCT = FALSE,
+                                                 DE.method = "wilcox",
+                                                 n.cores = n.cores)
+  saveRDS(msc.marker.list,file = outfile)
+}else{
+  msc.marker.list = readRDS(outfile)
+}
+
+# enforce greater expression frequency within the cluster, and require at least 20% cells to express
+msc.marker.list.sig = lapply(msc.marker.list,function(x) subset(x,pct.1 > pct.2 & (pct.1 - pct.2) > 0.1 & pct.1 > 0.5 & pct.2 < 0.5 & p_val_adj < 0.05 & avg_log2FC > log2(1.2)))
+msc.marker.list.sig = lapply(msc.marker.list.sig,function(x) x[order(x$pct.1 - x$pct.2,decreasing = T),])
+print(sapply(msc.marker.list.sig,dim))
+
+
+```
+
+## [Section 6. Hierarchical visualization of markers]{#S6}
+
+The cluster hierarchy has been integrated with the dotplot to show the marker expression architecture.
+
+```{r hierarcy dotplot,message = FALSE}
+## established markers
+# get the markers
+ct.markers = c("T-cell" = "CD3D","CD4" = "CD4","CD8" = "CD8A","CD8" = "NKG7",
+               "effector CD8" = "IFNG",
+               "Treg" = "FOXP3","Treg" = "IL2RA",
+               "B-cell" = "CD19","Monocyte" = "CD14",
+               "M1" = "HLA-DRA","M2" = "MSR1","MDSC" = "S100A9",
+               "Dendritic" = "NRP1",
+               "NK" = "NCAM1","Erythrocyte" = "HBA1","Platelet" = "PF4")
+ct.markers.mapped = rownames(seu)[match(ct.markers,gsub("\\|(.*)$","",rownames(seu)))];
+names(ct.markers.mapped) = names(ct.markers);
+  
+### get the plot
+cnt = Seurat::GetAssayData(seu,assay = "RNA",slot = "counts")
+mat = Seurat::GetAssayData(seu,assay = "RNA",slot = "scale.data")
+rownames(cnt) = rownames(mat)
+htbl = iter.res$module.table[,c("cluster.name","parent.cluster")];colnames(htbl) = c("module.id","module.parent")
+modules = iter.res$modules
+hplot.out = plot_hierarchy_dot.raw(m = mat,cnts = cnt,
+                                   htbl,modules,celltype.markers = ct.markers.mapped,pct.mark = 0.1,
+                                   plot.hierarchy = TRUE,
+                                   filename = "pbmc_8k/hierarchy.celltype.png",width.per.plot = 500,height.per.plot = 3500)
+
+plot_grid(plotlist = lapply(hplot.out$plotlist,function(x) x + theme(legend.position = "none")),ncol = 4)
+```
+
+## [Section 7. Cell type annotations using SingleR]{#S7}
+
+We used SingleR, as an independent cell type inference method. SingleR works with another R package, celldex, which holds comprehensive reference data sets for generic PBMC cell types.
+
+```{r SingleR cell annotations,message=FALSE}
+library(SingleR)
+library(celldex)
+hpca.se <-  MonacoImmuneData()
+  
+m = GetAssayData(seu,assay = "RNA",slot = "scale.data")
+rownames(m) = gsub("\\|(.*)$","",rownames(m))
+gene.common = intersect(rownames(hpca.se),rownames(m))
+hpca.se = hpca.se[gene.common,]
+m = m[gene.common,]
+  
+# fine subtype
+pred.ct <- SingleR(test = m, ref = hpca.se, assay.type.test=1,
+                   labels = hpca.se$label.fine)
+  
+seu@meta.data$inferred.cell.type.fine = pred.ct$pruned.labels[match(colnames(seu),rownames(pred.ct))]
+
+# fine subtype
+pred.ct <- SingleR(test = m, ref = hpca.se, assay.type.test=1,
+                   labels = hpca.se$label.main)
+
+seu@meta.data$inferred.cell.type.broad = pred.ct$pruned.labels[match(colnames(seu),rownames(pred.ct))]
+
+Seurat::DimPlot(seu,group.by = "inferred.cell.type.broad",reduction = "tSNE")
+rm(hpca.se)
+gc()
+```
+
+## [Section 8. Visualize MSC results using various tools]{#S8}
+
+```{r MSC plots,message=FALSE}
+
+### get embedding coordinates
+xy = Embeddings(seu,"tSNE")
+xy = xy[colnames(seu),]
+
+### clustering results
+# get the membership rooted to certain parent module
+vec = get_rooted_membership(mtbl = iter.res$module.table,
+                            modules = iter.res$modules,
+                            pid = iter.res$root.cluster,bg = colnames(seu))
+pobj.msc = plot_dimred_manual.raw(xy,
+                                  cell.feat = vec,
+                                  alpha.val = 0.3,cls.col = NULL,add.labels = TRUE)
+# add other aesthetic features
+pobj.msc = pobj.msc + 
+guides(colour = "none") + 
+  theme_classic() + 
+  theme(axis.line = element_blank(),axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank()) +
+  annotate(geom = "segment",x = quantile(xy[,1],0),xend = quantile(xy[,1],0.1),y = min(xy[,2]),yend = min(xy[,2]),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc"))) + 
+  annotate(geom = "segment",x = min(xy[,1]),xend = min(xy[,1]),y = min(xy[,2]),yend = quantile(xy[,2],0.1),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc")) )
+
+### get cell type tSNE plots
+vec = seu@meta.data$inferred.cell.type.broad;names(vec) = colnames(seu)
+pobj.ct.broad = plot_dimred_manual.raw(xy,cell.feat =vec,alpha.val = 0.3,cls.col = NULL,add.labels = TRUE) + guides(colour = "none") + 
+  theme_classic() + 
+  theme(axis.line = element_blank(),axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank()) +
+  annotate(geom = "segment",x = quantile(xy[,1],0),xend = quantile(xy[,1],0.1),y = min(xy[,2]),yend = min(xy[,2]),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc"))) + 
+  annotate(geom = "segment",x = min(xy[,1]),xend = min(xy[,1]),y = min(xy[,2]),yend = quantile(xy[,2],0.1),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc")) )
+
+library(cowplot)
+print(plot_grid(pobj.msc,pobj.ct.broad,ncol = 2))
+```
+
+## [Section 9. Hierarchical cluster respresentation with piecharts]{#S9}
+
+The multi-scale clustering architecture in MSC can be effectively represented as a hierarchical dendrogram. Here, we make use of this hierarchy to visualize the cell cluster characteristic by pie charts at different hierarchical levels, allowing to inspect the relationship between the hierarchy and cell cluster features.
+
+```{r hierarchy piechart,message=FALSE}
+library(RColorBrewer)
+
+# assign cell type colors
+vec.ct = seu@meta.data$inferred.cell.type.broad;names(vec.ct) = colnames(seu);
+ct = unique(vec.ct)
+colmap.ct = brewer.pal(n = length(ct),"Set3")
+names(colmap.ct) = ct
+
+# get cluster hierarchy
+htbl = subset(iter.res$module.table,module.size >= 30)[,c("cluster.name","parent.cluster")]
+modules = iter.res$modules
+
+# make piechart
+pie.ct = plot_hierarchy_pie(htbl,modules,vec.ct,colmap = colmap.ct,edge_colour = "grey") 
+pie.ct = pie.ct + guides(fill = guide_legend(label.theme = element_text(size = 15),title.theme = element_text(size = 17),title = "Cell Type"))
+
+# extract legend
+library(ggpubr)
+leg = get_legend(pie.ct) 
+leg = as_ggplot(leg)
+
+txt.dat = pie.ct$data[,c("x","y","name")]
+txt.dat = subset(txt.dat,name %in% c(subset(iter.res$module.table,parent.cluster == "M1")$cluster.name))
+library(ggrepel)
+pie.ct = pie.ct + geom_text_repel(data = txt.dat,aes(x = x,y = y,label = name),colour = "darkblue",segment.colour = "darkblue",vjust = 1.5,size = 6) + 
+  guides(fill = "none") + 
+  theme(panel.border = element_blank(),legend.position = "right",legend.direction = "vertical",
+        legend.text = element_text(size = 16),
+        plot.title = element_text(size = 20,hjust = 0.5),
+        plot.margin = margin(t = 0,r = 0,b = 0,l = 0)) 
+pie.ct = plot_grid(pie.ct,leg,ncol = 1,rel_heights = c(0.8,0.3))
+
+print(pie.ct)
+
+```
