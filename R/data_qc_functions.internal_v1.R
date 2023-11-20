@@ -1,3 +1,70 @@
+#' @title Load 10x-style count matrix
+#' @name load_mtx
+#' @description  Loads 10x count matrices.  
+#' @param mtx.folder A character to specify folder name that holds the three files (matrix.mtx - count data, features.tsv - feature data, barcodes.tsv - cell barcode data). If NULL, specific file path name has to be specified in mat.path, feat.path and bar.path. 
+#' @param mat.path A character value. If mtx.folder is NULL, mat.path has to be specified for the matrix.mtx file. 
+#' @param feat.path A character value. If mtx.folder is NULL, feat.path has to be specified for the features.tsv file. 
+#' @param bar.path A character value. If mtx.folder is NULL, feat.path has to be specified for the barcodes.tsv file. 
+#' @param is.gzip A logical. If TRUE, the input files are understood as gzipped, and handled accordingly to open.   
+#' @return Returns a list consisting of gene.matrix (sparse gene count matrix), gene.features (a data.frame containing feature annotation) and barcode.features (a data.frame containing barcode annotations).
+#' @export 
+load_mtx <- function(mtx.folder,mat.path = NULL,feat.path = NULL,bar.path = NULL,is.gzip = FALSE)
+{
+  require(Matrix)
+  if (!is.null(mtx.folder))
+  {
+    if (!is.gzip)
+    {
+      matrix.path = paste(mtx.folder,"/matrix.mtx",sep = "")
+      features.path = paste(mtx.folder,"/features.tsv",sep = "")
+      barcode.path = paste(mtx.folder,"/barcodes.tsv",sep = "")
+      
+      # read matrix
+      mat <- readMM(file = matrix.path)
+      feature.names = read.delim(features.path,header = FALSE,stringsAsFactors = FALSE)
+      barcode.names = read.delim(barcode.path,header = FALSE,stringsAsFactors = FALSE)
+      colnames(mat) = barcode.names$V1
+      rownames(mat) = feature.names$V1
+      output = list(gene.matrix = mat,gene.features = feature.names,barcode.features = barcode.names)
+    }else{
+      matrix.path = paste(mtx.folder,"/matrix.mtx.gz",sep = "")
+      features.path = paste(mtx.folder,"/features.tsv.gz",sep = "")
+      barcode.path = paste(mtx.folder,"/barcodes.tsv.gz",sep = "")
+      
+      # read matrix
+      mat <- readMM(file = gzfile(matrix.path))
+      feature.names = read.delim(gzfile(features.path),header = FALSE,stringsAsFactors = FALSE)
+      barcode.names = read.delim(gzfile(barcode.path),header = FALSE,stringsAsFactors = FALSE)
+      colnames(mat) = barcode.names$V1
+      rownames(mat) = feature.names$V1
+      output = list(gene.matrix = mat,gene.features = feature.names,barcode.features = barcode.names)
+    }
+  }else{
+    if (!is.gzip)
+    {
+      # read matrix
+      mat <- readMM(file = mat.path)
+      feature.names = read.delim(feat.path,header = FALSE,stringsAsFactors = FALSE)
+      barcode.names = read.delim(bar.path,header = FALSE,stringsAsFactors = FALSE)
+      colnames(mat) = barcode.names$V1
+      rownames(mat) = feature.names$V1
+      output = list(gene.matrix = mat,gene.features = feature.names,barcode.features = barcode.names)
+    }else{
+      # read matrix
+      mat <- readMM(file = gzfile(mat.path))
+      feature.names = read.delim(gzfile(feat.path),header = FALSE,stringsAsFactors = FALSE)
+      barcode.names = read.delim(gzfile(bar.path),header = FALSE,stringsAsFactors = FALSE)
+      colnames(mat) = barcode.names$V1
+      rownames(mat) = feature.names$V1
+      output = list(gene.matrix = mat,gene.features = feature.names,barcode.features = barcode.names)
+    }
+    
+  }
+  
+  
+  return(output)
+}
+
 get_gene_qualities <- function(sce,bio.cutoff = 0,pval.cutoff = 0.2,min.cells = 10)
 {
   # process data normalization
@@ -8,7 +75,7 @@ get_gene_qualities <- function(sce,bio.cutoff = 0,pval.cutoff = 0.2,min.cells = 
   
   # evaluate 
   gene.var <- modelGeneVar(sce)
-  ncell = rowSums(counts(sce) > 1E-320,na.rm = T)
+  ncell = Matrix::rowSums(counts(sce) > 1E-320,na.rm = T)
   gene.var$cell.express = ncell;
   gene.var$bio.filtered = rownames(gene.var) %in% rownames(subset(gene.var,bio > bio.cutoff & p.value < pval.cutoff & cell.express >= min.cells ))
   
@@ -69,7 +136,7 @@ process_data <- function(sim,do.impute = FALSE)
   # run imputation: ALRA
   if (do.impute)
   {
-    dat = as.matrix(t(logcounts(sim)))
+    dat = as.matrix(Matrix::t(logcounts(sim)))
     alra.res = alra(A_norm= dat);rm(dat)
     m = t(alra.res[[3]])
     dimnames(m) = dimnames(logcounts(sim))

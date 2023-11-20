@@ -127,6 +127,22 @@ plot.hierarchy = TRUE,filename = "celltype_markers.hierarchy_dot.png",width.per.
 	return(list(marker.stats = total.data,plotlist = plist))
 }
 
+#' @title Hierarchical representation of marker dot plots  
+#' @name plot_hierarchy_dot.raw
+#' @description Create circular hierarchy tree to visualize dot plot for desired marker genes, and calculate the marker statistics for provided genes.
+#' @param m log-normalized gene expression matrix to calculate the average expression levels.  
+#' @param cnts count matrix to calculate the %. of cells expressing genes. 
+#' @param htbl A two column data.frame table. The first column is cluster name, and the second column is its parent cluster name.  
+#' @param modules A named list object. Each is the character vector of cells from a cell cluster. 
+#' @param celltype.markers A named character vector for the list of genes to create the dotplot. The names specify cell type names. 
+#' @param plot.hierarchy A logical. If FALSE, only marker statistics will be returned. 
+#' @param filename A character. If provided, a .png file will be outputed with the filename. 
+#' @param width.per.plot A numeric. The width per plot.
+#' @param height.per.plot A numeric. The height per plot.  
+#' @return a list of data.frame for the marker statistics, and list of ggplot objects holding the plots.
+#' @examples 
+#' # See Vignettes. 
+#' @export
 plot_hierarchy_dot.raw <- function(m,cnts,htbl,modules,celltype.markers,pct.mark = 0.1,
                                plot.hierarchy = TRUE,filename = "celltype_markers.hierarchy_dot.png",width.per.plot = 2500,height.per.plot = 3500)
 {
@@ -154,8 +170,8 @@ plot_hierarchy_dot.raw <- function(m,cnts,htbl,modules,celltype.markers,pct.mark
       cc.p = which(colnames(cnts) %in% modules[mp][[1]] & !(colnames(cnts) %in% modules[mids[i]][[1]]))
       cc.i = which(colnames(cnts) %in% modules[mids[i]][[1]])
       
-      cnt.p = rowSums(cnts[rr,cc.p] > 1E-320,na.rm = TRUE)
-      cnt.i = rowSums(cnts[rr,cc.i] > 1E-320,na.rm = TRUE)
+      cnt.p = Matrix::rowSums(cnts[rr,cc.p] > 1E-320,na.rm = TRUE)
+      cnt.i = Matrix::rowSums(cnts[rr,cc.i] > 1E-320,na.rm = TRUE)
       
       # get average expressions
       rr = which(rownames(m) %in% celltype.markers)
@@ -182,7 +198,7 @@ plot_hierarchy_dot.raw <- function(m,cnts,htbl,modules,celltype.markers,pct.mark
   # add M0 stats
   rr = which(rownames(cnts) %in% celltype.markers)
   cc = which(colnames(cnts) %in% modules$M0)
-  pct.o = rowSums(cnts[rr,cc] > 1E-320,na.rm = TRUE)/length(cc)
+  pct.o = Matrix::rowSums(cnts[rr,cc] > 1E-320,na.rm = TRUE)/length(cc)
   expr.o = rowMeans(m[rownames(m) %in% celltype.markers,colnames(cnts) %in% modules$M0],na.rm = TRUE)
   mrks = union(names(pct.o),names(expr.o))
   
@@ -269,7 +285,23 @@ overlap_modules_wt_categ <- function(mods,vec)
   return(mat)
 }
 
-
+#' @title Hierarchical representation of modules with piecharts  
+#' @name plot_hierarchy_pie
+#' @description Create circular hierarchy tree to visualize the cluster hierarchy, with pie chart to show cell cluster composition 
+#' @param htbl A two column data.frame table. The first column is cluster name, and the second column is its parent cluster name.  
+#' @param modules A named list object. Each is the character vector of cells from a cell cluster. 
+#' @param vec A factor vector, containing different groups of cells. 
+#' @param edge_colour edge colour of pie chart.
+#' @param colmap a named vector to assign colors to each group in vec. 
+#' @return a ggplot object
+#' @examples 
+#' data(pbmc_8k_msc_results)
+#' htbl = pbmc_8k_msc_results$pruned.table[,c("cluster.name","parent.cluster")]
+#' modules = pbmc_8k_msc_results$modules
+#' bg = Reduce("union",modules)
+#' vec = sample(LETTERS[1:10],length(bg),replace = TRUE);names(vec) = bg;vec = factor(vec)
+#' obj = plot_hierarchy_pie(htbl,modules,vec)
+#' @export
 plot_hierarchy_pie <- function(htbl,modules,vec,edge_colour = "black",colmap = NULL)
 {
   # create the basis graph object
