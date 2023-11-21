@@ -9,4 +9,5 @@ library(devtools);
 install_github("songlabcodes/MSC");
 
 **Vignettes**  
-[PBMC 8k example](http://htmlpreview.github.io/?https://github.com/songlabcodes/MSC/blob/main/vignettes/8k_PBMC_Example.html): This contains the overall MSC workflow from data pre-processing, clustering, marker identification to visualization of the results.
+[PBMC 8k example](http://htmlpreview.github.io/?https://github.com/songlabcodes/MSC/blob/main/vignettes/8k_PBMC_Example.html): This contains the overall MSC workflow from data pre-processing, clustering, marker identification to visualization of the results.  
+[Melanoma ICI example](http://htmlpreview.github.io/?https://github.com/songlabcodes/MSC/blob/main/vignettes/Jerby_Arnon_et_al_2018_example.html): This contains the overall MSC workflow and codes to reproduce Figures 6 & 7 from the manuscript.
