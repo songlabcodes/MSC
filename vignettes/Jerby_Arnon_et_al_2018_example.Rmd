@@ -1,0 +1,690 @@
+---
+title: 'Melanoma scRNA-seq: immune checkpoint inhibition (ICI) data from Jerby Arnon et
+  al. 2018'
+author: "Won-Min Song"
+date: '2023-11-21'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# MSC applications to ICI-treated melanoma scRNA-seq
+
+This is R codes used to identify unique melanoma subpopulations resistant ICI, as shown in the manuscript. The pre-processed data in Seurat object format can be downloaded from [the synapse data repository (syn53012610)](https://www.synapse.org/#!Synapse:syn53012610). The data should be placed under "Data/melanoma_ICI" folder.
+
+```{r Loading data}
+rm(list = ls())
+library(Seurat)
+library(DESeq2)
+library(Matrix.utils)
+library(Matrix)
+library(doParallel)
+library(igraph)
+library(ggraph)
+library(MSC)
+seu = readRDS("Data/melanoma_ICI/integrated_and_SCTMerged.seurat.RDS")
+
+out.dir <- "melanoma_ICI";dir.create(out.dir)
+n.cores = 4 # number of cores to use when running parallelization
+min.cells = 10 # minimum cluster size
+
+# update tsne
+set.seed(123)
+seu = Seurat::RunTSNE(seu,reduction = "pca",check_duplicates = FALSE )
+
+# set up cell type name
+vec = seu@meta.data$cell.types;names(vec) = colnames(seu)
+  
+vec[vec == "B.cell"] = "B-cell"
+vec[vec == "T.CD8"] = "CD8 T-cell"
+vec[vec == "T.CD4"] = "CD4 T-cell"
+vec[vec == "T.cell"] = "T-cell(CD3+)"
+vec[vec == "Mal"] = "Tumor"
+vec[vec == "?"] = NA
+seu@meta.data$cell.types.rename = vec
+
+```
+
+## MSC workflow
+
+Run MSC on the integrated data. The hierarchical marker calculation will identify subcluster markers, conditioned on the parent cluster. The marker calculation will take some time (\~ 10 min).
+
+```{r MSC workflow}
+
+if (!file.exists(paste0(out.dir,"/MSC.results.RDS")))
+{
+  # use integrated data for clustering
+  m = GetAssayData(seu,assay = "integrated",slot = "data")
+    
+  ### calculate gene variance, then select variable, log-normalized gene expression
+  if (any(m < 0))
+  {
+    # if any entry is negative, offset it for calculation
+    eta = abs(min(m,na.rm = TRUE))
+    m.var = modelGeneVar(x = (m + eta));
+  }else{
+    m.var = modelGeneVar(x = m);
+  }
+    
+  # extract genes with significant dispersion
+  m.sigvar = subset(m.var,p.value < 0.05)
+  m = m[rownames(m.sigvar),]
+    
+  # extract binary count data
+  bcnt = GetAssayData(seu,assay = "RNA",slot = "counts");
+  bcnt[bcnt > 1E-320]= 1 # binarize
+  bcnt = bcnt[rownames(m),]
+  
+  # Register cores
+  if (getDoParWorkers() == 1 & n.cores > 1 & !(n.cores == getDoParWorkers()))
+  {
+    cl <- parallel::makeCluster(n.cores)
+    registerDoParallel(cl)
+    cat(paste0(getDoParWorkers()," cores have been registered.\n"))
+  }
+  
+  ## Run the msc_workflow() wrapper function to execute MSC workflow. 
+  iter.res = msc_workflow(dat = m,bcnt = bcnt,n.cores = n.cores,min.cells = min.cells, valid.gate = "both")
+  iter.res = prune_hierarchy.compact(iter.res)
+  rm(m.var,bcnt,m,m.sigvar)
+  gc()
+  
+  saveRDS(iter.res,file = paste0(out.dir,"/MSC.results.RDS"))
+}else{
+  iter.res = readRDS(file = paste0(out.dir,"/MSC.results.RDS"))
+}
+
+## get the markers
+if (!file.exists(paste0(out.dir,"/MSC.markers.RDS")))
+{
+  msc.marker.list = run_hierarchical_markers.par(obj.o = seu,mtbl = iter.res$pruned.table,
+                                                 modules = iter.res$modules,
+                                                 grp.var = "samples",cls.var = "msc.cluster",
+                                                 find.conserved = FALSE,assay.name = "SCT",recorrect.SCT = FALSE,
+                                                 DE.method = "MAST",
+                                                 n.cores = n.cores)
+  
+  saveRDS(msc.marker.list,file = paste0(out.dir,"/MSC.markers.RDS"))
+}else{
+  msc.marker.list = readRDS(file = paste0(out.dir,"/MSC.markers.RDS"))
+}
+```
+
+## Visualize the results in UMAP
+
+```{r UMAP visualization}
+#### Cluster results: 1st layer
+# get embedding coordinates
+xy = Embeddings(seu,"tsne")
+xy = xy[colnames(seu),]
+  
+  
+# get visualization
+vec = get_rooted_membership(mtbl = iter.res$pruned.table,
+                            modules = iter.res$modules,
+                            pid = "M0",bg = colnames(seu))
+  
+xy = Embeddings(seu,"umap")
+xy = xy[colnames(seu),]
+  
+names(vec) = colnames(seu)
+pobj.o = plot_dimred_manual.raw(xy,
+                                    cell.feat =vec,
+                                    alpha.val = 0.3,cls.col = NULL,add.labels = TRUE)
+pobj.o = pobj.o + 
+    guides(color = guide_legend(override.aes = list(alpha = 1,size=3),title = "1st Layer\nSplit",ncol = 1,
+                                title.theme = element_text(size = 15),label.theme =element_text(size=13))) +
+    theme_classic() + 
+    theme(axis.line = element_blank(),axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank()) +
+    annotate(geom = "segment",x = quantile(xy[,1],0),xend = quantile(xy[,1],0.1),y = min(xy[,2]),yend = min(xy[,2]),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc"))) + 
+    annotate(geom = "segment",x = min(xy[,1]),xend = min(xy[,1]),y = min(xy[,2]),yend = quantile(xy[,2],0.1),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc")) )+
+    annotate(geom = "text",x = mean(c(min(xy[,1]),quantile(xy[,1],0.1))),y = min(xy[,2]),hjust = 0.4,vjust = -0.5,label = "X") + 
+    annotate(geom = "text",x = min(xy[,1]),y = mean(c(min(xy[,2]),quantile(xy[,2],0.1))),angle = 90,hjust = 0.5,vjust = 1.5,label = "Y")
+
+#### Cell type results
+vec = seu@meta.data$cell.types.rename;names(vec)= colnames(seu)
+vec = vec[rownames(xy)];
+  
+# set up cell type colors
+ct.cols = c("B-cell" = "blueviolet","NK" = "deeppink1","CD8 T-cell" = "coral","CD4 T-cell" = "slateblue","T-cell(CD3+)" = "cadetblue1",
+  "Endo." = "chocolate1","CAF" = "darkgoldenrod1","Macrophage" = "darkseagreen4","Tumor" = "chartreuse","?" = "grey")
+
+
+pobj.ct = plot_dimred_manual.raw(xy,cls.col = ct.cols,
+                                cell.feat = vec,is.repel = T,
+                                alpha.val = 0.3,add.labels = TRUE)
+  pobj.ct = pobj.ct + 
+    guides(color = guide_legend(override.aes = list(alpha = 1,size=3),title = "Cell type",title.theme = element_text(size = 15),label.theme =element_text(size=13))) +
+    scale_colour_manual(values = ct.cols) + 
+    theme_classic() + 
+    theme(axis.line = element_blank(),axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank()) +
+    annotate(geom = "segment",x = quantile(xy[,1],0),xend = quantile(xy[,1],0.1),y = min(xy[,2]),yend = min(xy[,2]),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc"))) + 
+    annotate(geom = "segment",x = min(xy[,1]),xend = min(xy[,1]),y = min(xy[,2]),yend = quantile(xy[,2],0.1),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc")) )+
+    annotate(geom = "text",x = mean(c(min(xy[,1]),quantile(xy[,1],0.1))),y = min(xy[,2]),hjust = 0.4,vjust = -0.5,label = "X") + 
+    annotate(geom = "text",x = min(xy[,1]),y = mean(c(min(xy[,2]),quantile(xy[,2],0.1))),angle = 90,hjust = 0.5,vjust = 1.5,label = "Y")
+
+### set up cell type name
+vec = seu@meta.data$treatment.group;names(vec) = colnames(seu)
+
+vec[vec == "post.treatment"] = "post-ICI"
+vec[vec == "treatment.naive"] = "ICI-naive"
+
+vec = vec[rownames(xy)];
+# set up cell type colors
+trt.cols = c("post-ICI" = "tomato3","ICI-naive" = "seagreen3")
+#xy = Embeddings(seu,"umap")
+#xy = xy[colnames(seu),]
+
+#names(vec) = colnames(seu)
+pobj.trt = plot_dimred_manual.raw(xy,cls.col = trt.cols,
+                                  cell.feat =vec,is.repel = T,
+                                  alpha.val = 0.3,add.labels = TRUE)
+pobj.trt = pobj.trt + 
+  guides(color = guide_legend(override.aes = list(alpha = 1,size=3),title = "ICI Status",title.theme = element_text(size = 15),label.theme =element_text(size=13))) +
+  scale_colour_manual(values = trt.cols) + 
+  theme_classic() + 
+  theme(axis.line = element_blank(),axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank()) +
+  annotate(geom = "segment",x = quantile(xy[,1],0),xend = quantile(xy[,1],0.1),y = min(xy[,2]),yend = min(xy[,2]),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc"))) + 
+  annotate(geom = "segment",x = min(xy[,1]),xend = min(xy[,1]),y = min(xy[,2]),yend = quantile(xy[,2],0.1),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc")) )+
+  annotate(geom = "text",x = mean(c(min(xy[,1]),quantile(xy[,1],0.1))),y = min(xy[,2]),hjust = 0.4,vjust = -0.5,label = "X") + 
+  annotate(geom = "text",x = min(xy[,1]),y = mean(c(min(xy[,2]),quantile(xy[,2],0.1))),angle = 90,hjust = 0.5,vjust = 1.5,label = "Y")
+library(cowplot)
+plot_grid(pobj.trt,pobj.o,pobj.ct,ncol = 3)
+
+```
+
+## Visualize the cluster hierarchy and piecharts
+
+```{r piechart representations}
+### Cluster hierarchy and lists
+library(ggpubr)
+htbl = subset(iter.res$pruned.table,module.size >= 30)[,c("cluster.name","parent.cluster")]
+modules = iter.res$modules
+
+### cell type composition
+vec.ct = seu@meta.data$cell.types.rename;names(vec.ct) = colnames(seu);
+colmap.ct = c("B-cell" = "blueviolet","NK" = "deeppink1","CD8 T-cell" = "coral","CD4 T-cell" = "slateblue","T-cell(CD3+)" = "cadetblue1",
+              "Endo." = "chocolate1","CAF" = "darkgoldenrod1","Macrophage" = "darkseagreen4","Tumor" = "chartreuse","?" = "grey")
+
+pie.ct = plot_hierarchy_pie(htbl,modules,vec.ct,colmap = colmap.ct,edge_colour = "grey") + guides(fill = guide_legend(title = "Cell Type",title.theme = element_text(size = 16),label.theme = element_text(size = 13)))
+#leg = get_legend(pie.ct);leg = as_ggplot(leg)
+txt.dat = pie.ct$data[,c("x","y","name")]
+txt.dat = subset(txt.dat,name %in% c(subset(iter.res$pruned.table,parent.cluster == "M0")$cluster.name))
+library(ggrepel)
+pie.ct = pie.ct + geom_text_repel(data = txt.dat,aes(x = x,y = y,label = name),colour = "darkblue",segment.colour = "darkblue",vjust = 1.5,size = 6) + 
+  theme(panel.border = element_blank(),legend.position = "right",legend.direction = "vertical",
+        legend.text = element_text(size = 16),
+        plot.title = element_text(size = 20,hjust = 0.5),
+        plot.margin = margin(t = 0,r = 0,b = 0,l = 0)) 
+
+### treatment conditions
+vec.trt = seu@meta.data$treatment.group;names(vec.trt) = colnames(seu);
+
+vec.trt[vec.trt == "post.treatment"] = "post-ICI"
+vec.trt[vec.trt == "treatment.naive"] = "ICI-naive"
+
+colmap.trt =c("post-ICI" = "tomato3","ICI-naive" = "seagreen3")
+
+pie.trt = plot_hierarchy_pie(htbl,modules,vec.trt,colmap = colmap.trt,edge_colour = "grey")  + 
+  guides(fill = guide_legend(title = "ICI",title.theme = element_text(size = 16),label.theme = element_text(size = 13)))
+txt.dat = pie.trt$data[,c("x","y","name")]
+txt.dat = subset(txt.dat,name %in% c(subset(iter.res$pruned.table,parent.cluster == "M0")$cluster.name))
+
+pie.trt = pie.trt + geom_text_repel(data = txt.dat,aes(x = x,y = y,label = name),colour = "darkblue",segment.colour = "darkblue",vjust = 1.5,size = 6) + 
+  theme(panel.border = element_blank(),legend.position = "right",legend.direction = "vertical",
+        legend.text = element_text(size = 16),
+        plot.title = element_text(size = 20,hjust = 0.5),
+        plot.margin = margin(t = 0,r = 0,b = 0,l = 0)) 
+
+plot_grid(pie.ct,pie.trt,ncol = 2)
+```
+
+## Calculate cell type predictions
+```{r compare clusters to cell types}
+## load other benchmark clustering results: codes to generate these results will be provided separately. 
+snn.out = readRDS("Data/melanoma_ICI/SNN.clusters.RDS")
+vec = readRDS(file = "Data/melanoma_ICI/SC3_clusters.RDS")
+seu@meta.data$SC3_clusters = vec[colnames(seu)]
+vec = readRDS(file = "Data/melanoma_ICI/CIDR_clusters.RDS")
+seu@meta.data$CIDR = factor(vec)
+rm(vec)
+
+## evaluation function
+evaluate_methods <- function(ct.lst,mod.lst)
+{
+  incl.rate <- covr.rate <- accr.rate <- rep(NA,length(mod.lst))
+  names(incl.rate) <- names(covr.rate) <- names(accr.rate) <- names(mod.lst)
+  for (i in 1:length(mod.lst))
+  {
+    incl.rate[i] = inclusion_rate(mod.o = ct.lst,mod.f = mod.lst[[i]])
+    covr.rate[i] = coverage_rate(mod.o = ct.lst,mod.f = mod.lst[[i]])
+    accr.rate[i] = detection_accuracy(mod.o = ct.lst,mod.f = mod.lst[[i]])
+  }
+  pdat = data.frame(method = names(mod.lst),incl.rate = incl.rate,covr.rate = covr.rate,accr.rate = accr.rate)
+  p1 = ggplot(data = pdat,aes(x = method,y = incl.rate,fill = method)) + geom_bar(stat = "identity") + 
+    labs(y = "Inclusion Rate") + 
+    scale_x_discrete(limits = names(mod.lst)) + 
+    guides(fill = "none") + 
+    theme_classic() + 
+    scale_y_continuous(limits = c(0,1)) + 
+    theme(axis.text.x = element_blank(),axis.title.x = element_blank(),axis.title.y = element_text(size = 17),
+          axis.text.y = element_text(size = 14))
+  p2 = ggplot(data = pdat,aes(x = method,y = covr.rate,fill = method)) + geom_bar(stat = "identity") + 
+    labs(y = "Coverage Rate") + 
+    scale_x_discrete(limits = names(mod.lst)) + 
+    guides(fill = "none") + 
+    scale_y_continuous(limits = c(0,1)) + 
+    theme_classic() + 
+    theme(axis.text.x = element_blank(),axis.title.x = element_blank(),axis.title.y = element_text(size = 17),
+          axis.text.y = element_text(size = 14))
+  p3 = ggplot(data = pdat,aes(x = method,y = accr.rate,fill = method)) + geom_bar(stat = "identity") + 
+    labs(y = "Detection Accuracy") + 
+    scale_x_discrete(limits = names(mod.lst)) + 
+    guides(fill = "none") + 
+    scale_y_continuous(limits = c(0,1)) + 
+    theme_classic() + 
+    theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1,size = 14),axis.title.x = element_blank(),axis.title.y = element_text(size = 17),
+          axis.text.y = element_text(size = 14))
+  
+  library(patchwork)
+  perf.plot = p1/p2/p3
+  return(list(pobj = perf.plot,pdata = pdat))
+}
+
+### Run evaluation
+mod.lst = c(list(MSC = iter.res$modules[iter.res$pruned.table$cluster.name]),
+            apply(snn.out$cluster.matrix,2,function(x) split(rownames(snn.out$cluster.matrix),factor(x))),
+            list(SC3 = split(colnames(seu),seu@meta.data$SC3_clusters)),
+            list(CIDR = split(colnames(seu),seu@meta.data$CIDR)))
+names(mod.lst) = gsub("seurat_snn_res\\.","SNN \u03B3=",names(mod.lst))
+
+# run evaluation
+if (TRUE)
+{
+  # check how cell types are reproduced: use the published cell types as the reference
+  ct.lst = split(colnames(seu),factor(seu@meta.data$cell.types.rename))
+  out.ct = evaluate_methods(ct.lst,mod.lst)
+  out.ct[[1]] = out.ct[[1]] + plot_annotation("Major Cell Type",theme = theme(plot.title = element_text(size = 20,hjust = 0.5,face ="bold")))
+  
+  # check how malignant samples are reproduced: use sample assignments as the reference
+  mal.cells = rownames(subset(seu@meta.data,cell.types == "Mal"))
+  mal.lst = split(mal.cells,seu@meta.data$samples[match(mal.cells,colnames(seu))])
+  out.mal = evaluate_methods(mal.lst,mod.lst)
+  out.mal[[1]] = out.mal[[1]] + plot_annotation("Malignant Tumors",theme = theme(plot.title = element_text(size = 20,hjust = 0.5,face ="bold")))
+  
+  # check t-cell subtypes: use published CD4/CD8 T-cell assignments as the reference
+  t.cells = rownames(subset(seu@meta.data,cell.types %in% c("T.CD8","T.CD4")))
+  t.lst = split(t.cells,seu@meta.data$cell.types[match(t.cells,colnames(seu))])
+  out.t = evaluate_methods(t.lst,mod.lst)
+  out.t[[1]] = out.t[[1]] + plot_annotation("CD4/CD8 T-cells",theme = theme(plot.title = element_text(size = 20,hjust = 0.5,face ="bold")))
+}
+### plot out
+library(cowplot)
+perf.pobj = plot_grid(out.ct[[1]],out.mal[[1]],out.t[[1]],ncol = 3)
+print(perf.pobj)
+
+### create Figure 6
+# add subtitles
+tag.thm = theme(plot.tag.position = "topleft",plot.tag = element_text(size=20,face="bold", color="black"))
+pobj.trt = pobj.trt + labs(tag = "A") + tag.thm
+pobj.ct = pobj.ct + labs(tag = "B") + tag.thm
+pobj.o = pobj.o + labs(tag = "C") + tag.thm
+pie.ct = pie.ct + labs(tag = "D") + tag.thm
+pie.trt = pie.trt + labs(tag = "E") + tag.thm
+umap.collect = pobj.trt | pobj.ct | pobj.o | (pie.ct / pie.trt)
+
+# create merged plot with umap
+perf.pobj = plot_grid(out.ct[[1]],out.mal[[1]],out.t[[1]],ncol = 3,labels = c("F","G","H"),label_size = 20)
+umap.perf = plot_grid(umap.collect,perf.pobj,ncol = 1,rel_heights = c(1.4,2))
+
+png(file = paste0(out.dir,"/ICI_performance_evaluation.png"),res = 500,width = 9500,height = 8600)
+print(umap.perf)
+dev.off()
+
+```
+# Figure 7: Identification of ZNF180-regulated ICI resistant tumor subpopulations
+
+## Calculate T-cell exclusion score
+
+```{r T-cell exclusion score}
+## load T-cell exclusion signature from the publication
+library(readxl)
+up.sig = read_excel(path = "Data/melanoma_ICI/mmc4.xlsx",sheet = 1,range = "A3:G18")
+dn.sig = read_excel(path = "Data/melanoma_ICI/mmc4.xlsx",sheet = 1,range = "I3:N26")
+
+# fetch melanoma clusterswith annotated tumors at < 50%. 
+mod.lv.1 = iter.res$modules[subset(iter.res$pruned.table,module.size >= 50)$cluster.name]
+tumor.rate = sapply(mod.lv.1,function(x) {v=table(seu@meta.data[x,]$cell.types.rename);v["Tumor"]/length(x)});
+names(tumor.rate) = gsub("\\.(.*)$","",names(tumor.rate))
+tumor.mods = names(tumor.rate)[which(tumor.rate > 0.5)]
+tumor.mods = iter.res$modules[tumor.mods]
+
+tumor.parents = iter.res$pruned.table$parent.cluster[match(names(tumor.mods),iter.res$pruned.table$cluster.name)]
+
+### Calculate T-cell exclusion scores within Tumors using AddModuleScore functionality in Seurat
+seu.tumor = seu[,seu@meta.data$cell.types.rename == "Tumor"]
+seu.tumor = AddModuleScore(object = seu.tumor,assay ="SCT",features = list("Tcell.excl.up" = up.sig[[1]],"Tcell.excl.dn" = dn.sig[[1]]),name = "Tcell.excl")
+colnames(seu.tumor@meta.data)[which(colnames(seu.tumor@meta.data) == "Tcell.excl1")] = "Tcell.excl.up"
+colnames(seu.tumor@meta.data)[which(colnames(seu.tumor@meta.data) == "Tcell.excl2")] = "Tcell.excl.dn"
+
+Tcell.score = data.frame()
+for (i in 1:length(tumor.mods))
+{
+  df = data.frame(mid = rep(names(tumor.mods)[i],length(tumor.mods[[i]])),
+                  seu.tumor@meta.data[match(tumor.mods[[i]],colnames(seu.tumor)),c("Tcell.excl.up","Tcell.excl.dn","treatment.group")])
+  Tcell.score = rbind.data.frame(Tcell.score,df)
+  rm(df)
+}
+Tcell.score$treatment.group[Tcell.score$treatment.group == "treatment.naive"] = "ICI-naive" 
+Tcell.score$treatment.group[Tcell.score$treatment.group == "post.treatment"] = "post-ICI"
+Tcell.score = subset(Tcell.score,!is.na(Tcell.excl.up) & !is.na(Tcell.excl.dn))
+lvs = unique(tumor.parents)
+Tcell.score$parent.cluster = factor(tumor.parents[match(Tcell.score$mid,names(tumor.mods))],levels = lvs[order(as.integer(gsub("^M","",lvs)))])
+
+# summarize scores
+require(reshape2)
+Tcell.m = cbind("UP" = sapply(split(Tcell.score$Tcell.excl.up,Tcell.score$mid),mean),"DN" = sapply(split(Tcell.score$Tcell.excl.dn,Tcell.score$mid),mean))
+Texcl.score = sort(Tcell.m[,1] - Tcell.m[,2])
+
+### plot T-cell exclusion score distributions
+# plot distribution
+library(ggplot2)
+library(ggbeeswarm)
+sobj.up = ggplot(data = Tcell.score,aes(x = mid,y = Tcell.excl.up,colour = treatment.group)) + geom_quasirandom(dodge.width = 0.8,alpha = 0.2) +
+  geom_boxplot(alpha = 0.2,outlier.color = NA) + 
+  scale_colour_manual(values = colmap.trt) + 
+  facet_grid(. ~ parent.cluster,scale = "free_x",space = "free_x") + 
+  #scale_x_discrete(limits = names(Texcl.score)) + 
+  theme_classic() + 
+  geom_hline(yintercept = 0,colour = "red") + 
+  labs(y = "T-cell Excl.\n(UP)") + 
+  guides(colour = "none") +
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(size = 14,angle = 45,vjust = 1,hjust = 1),
+        axis.text.y = element_text(size = 15),
+        strip.text.x.top = element_text(size = 13),
+        axis.title.y = element_text(size = 16))
+sobj.dn = ggplot(data = Tcell.score,aes(x = mid,y = Tcell.excl.dn,colour = treatment.group)) + geom_quasirandom(dodge.width = 0.8,alpha = 0.2) +
+  geom_boxplot(alpha = 0.2,outlier.color = NA) + 
+  scale_colour_manual(values = colmap.trt) + 
+  facet_grid(. ~ parent.cluster,scale = "free_x",space = "free_x") + 
+  #scale_x_discrete(limits = names(Texcl.score)) + 
+  geom_hline(yintercept = 0,colour = "red") + 
+  theme_classic() + 
+  labs(y = "T-cell Excl.\n(DN)") + 
+  guides(colour = "none") +
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(size = 14,angle = 45,vjust = 1,hjust = 1),
+        axis.text.y = element_text(size = 15),
+        strip.text.x.top = element_text(size = 13),
+        axis.title.y = element_text(size = 16))
+
+# draw plot
+plot_grid(sobj.up,sobj.dn,ncol = 1)
+```
+
+## Calculate ZNF180 score
+
+```{r ZNF180 scores}
+### load ZNF180 KD signatures from publication data
+deg.tbl = read_excel(path = "Data/melanoma_ICI/41467_2021_21457_MOESM9_ESM.xlsx",sheet = 1,skip = 2)
+deg.tbl = subset(deg.tbl,!is.na(DEG.ID) & DEG.ID != "NA" & adj.P.Val < 0.05 & abs(logFC) > log2(1.2))
+table(deg.tbl$signature.id)
+sigs = split(deg.tbl$ID,factor(deg.tbl$signature.id))
+names(sigs) = gsub("-NTC","",names(sigs))
+
+seu.tumor = AddModuleScore(object = seu.tumor,assay ="SCT",features = sigs,name = "KD")
+nc = ncol(seu.tumor@meta.data)
+colnames(seu.tumor@meta.data)[(nc-length(sigs)+1):nc] = names(sigs)
+
+KD.score = data.frame()
+for (i in 1:length(tumor.mods))
+{
+  df = data.frame(mid = rep(names(tumor.mods)[i],length(tumor.mods[[i]])),
+                  seu.tumor@meta.data[match(tumor.mods[[i]],colnames(seu.tumor)),c(names(sigs),"treatment.group")])
+  KD.score = rbind.data.frame(KD.score,df)
+  rm(df)
+}
+KD.score$treatment.group[KD.score$treatment.group == "treatment.naive"] = "ICI-naive" 
+KD.score$treatment.group[KD.score$treatment.group == "post.treatment"] = "post-ICI"
+KD.score = subset(KD.score,!is.na(treatment.group))
+
+### Draw down-regulated signatures score by ZNF180 KD
+library(dplyr)
+df.dn = KD.score %>% group_by(mid,treatment.group) %>% 
+  summarise(ZNF180_DN=mean(ZNF180_DN),
+            .groups = 'drop')
+df.dn$parent.cluster = factor(tumor.parents[match(df.dn$mid,names(tumor.mods))],levels = lvs[order(as.integer(gsub("^M","",lvs)))])
+KD.dn = ggplot() + 
+  geom_tile(data = df.dn,aes(x = mid,fill = ZNF180_DN,y = treatment.group)) +
+  scale_fill_gradient2(low = "white",mid = "white",high = "red",midpoint = quantile(KD.score$ZNF180_DN,0.25)) + 
+  #scale_x_discrete(limits = names(Texcl.score)) + 
+  facet_grid(. ~ parent.cluster,scale = "free_x",space = "free_x") + 
+  theme_classic() + 
+  labs(title = "ZNF180 KD (DN)") + 
+  guides(fill = "none") +
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(size = 14,angle = 45,vjust = 1,hjust = 1),
+        plot.title = element_text(size = 17,hjust = 0.5),
+        axis.text.y = element_text(size = 15),
+        strip.text.x.top = element_text(size = 13),
+        axis.title.y = element_blank())
+
+### Draw up-regulated signatures score by ZNF180 KD
+df.up = KD.score %>% group_by(mid,treatment.group) %>% 
+  summarise(ZNF180_UP=mean(ZNF180_UP),
+            .groups = 'drop')
+df.up$parent.cluster = factor(tumor.parents[match(df.up$mid,names(tumor.mods))],levels = lvs[order(as.integer(gsub("^M","",lvs)))])
+KD.up = ggplot() + 
+  geom_tile(data = df.up,aes(x = mid,fill = ZNF180_UP,y = treatment.group)) +
+  scale_fill_gradient2(low = "blue",mid = "white",high = "white",midpoint = quantile(KD.score$ZNF180_UP,0.75)) + 
+  #scale_x_discrete(limits = names(Texcl.score)) + 
+  facet_grid(. ~ parent.cluster,scale = "free_x",space = "free_x") + 
+  theme_classic() + 
+  labs(title = "ZNF180 KD (UP)") + 
+  guides(fill = "none") +
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(size = 14,angle = 45,vjust = 1,hjust = 1),
+        plot.title = element_text(size = 17,hjust = 0.5),
+        axis.text.y = element_text(size = 15),
+        strip.text.x.top = element_text(size = 13),
+        axis.title.y = element_blank())
+
+# adjust aesthetics
+KD.up = KD.up + labs(y = "",title= "ZNF180-driven Suppression") + theme(axis.text.x = element_blank(),axis.title.y =  element_blank(),plot.title = element_text(size = 17,hjust = 0.5))
+  KD.dn = KD.dn + labs(y = "",title = "ZNF180-driven Activation") + theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1,size = 15),axis.title.y =  element_blank(),plot.title = element_text(size = 17,hjust = 0.5))
+  
+plot_grid(KD.up,KD.dn,ncol = 1)
+```
+
+## Get cell proportion plots
+
+For each tumor cluster, the cell proportions of post-ICI/ICI-naive are plotted.
+
+```{r ICI proportion}
+### load functions for plotting
+# get proportion plot
+library(reshape)
+get_proportion_plot <- function(modules,vec,cols = NULL)
+{
+  prmat = overlap_modules_wt_categ(mods = modules,vec = vec)
+  prdf = melt(prmat);colnames(prdf) = c("X1","X2","value")
+  prdf$X1 = factor(prdf$X1)
+  prdf$X2 = factor(prdf$X2,levels = names(cols))
+  pobj = ggplot(data = prdf,aes(x = X1,y = value,fill = X2)) + geom_bar(stat = "identity",position = "stack") 
+  if (!is.null(cols)) {pobj = pobj + scale_fill_manual(values = cols);prdf$X2 = factor(prdf$X2,levels = names(cols))}
+  pobj = pobj + theme_bw() + 
+    guides(fill = guide_legend(title = "",ncol = 2)) + 
+    theme(axis.title = element_blank(),axis.text = element_text(size = 15),legend.position = "bottom")
+  return(pobj)
+}
+overlap_modules_wt_categ <- function(mods,vec)
+{
+  tpe = setdiff(unique(vec),NA)
+  mat = do.call('rbind',lapply(mods,function(x,y,t) {out = table(y[names(y) %in% x])/length(x);out[match(tpe,names(out))]},y = vec,t = tpe))
+  mat[is.na(mat)] = 0;
+  #rownames(mat) = gsub("^c1_","M",rownames(mat));
+  colnames(mat) = tpe
+  
+  if (any(rowSums(mat,na.rm = TRUE) < 1))
+  {
+    mat = cbind(mat,1-rowSums(mat,na.rm = TRUE))
+    colnames(mat)[ncol(mat)] = "unassigned"
+  }
+  return(mat)
+}
+
+# create proportion barplot
+grp = seu@meta.data$treatment.group;
+grp[grp == "post.treatment"] = "post-ICI";grp[grp == "treatment.naive"] = "ICI-naive"
+names(grp) = colnames(seu)
+modules = tumor.mods
+cols = colmap.trt
+prmat = overlap_modules_wt_categ(mods = modules,vec = grp)
+prdf = melt(prmat);colnames(prdf) = c("X1","X2","value")
+prdf$X1 = factor(prdf$X1)
+prdf$X2 = factor(prdf$X2,levels = names(cols))
+prdf$parent.cluster = factor(tumor.parents[match(prdf[[1]],names(tumor.mods))],levels = lvs[order(as.integer(gsub("^M","",lvs)))])
+bobj = ggplot(data = prdf,aes(x = X1,y = value,fill = X2)) + geom_bar(stat = "identity",position = "stack") 
+if (!is.null(cols)) {bobj = bobj + scale_fill_manual(values = cols);prdf$X2 = factor(prdf$X2,levels = names(cols))}
+bobj = bobj + theme_bw() + 
+  #scale_x_discrete(limits = names(Texcl.score)) + 
+  facet_grid(. ~ parent.cluster,scale = "free_x",space = "free_x") + 
+  scale_y_continuous(labels = scales::percent,limits = c(0,1)) + 
+  guides(fill = "none") + 
+  theme_classic() + 
+  theme(axis.title = element_blank(),axis.text.y = element_text(size = 18),legend.position = "bottom",
+        strip.text = element_text(size = 13),
+        axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1,size = 16))
+
+# output the plot
+print(bobj)
+```
+
+## Get key marker expressions in tumor subpopulations
+
+We will show several ZNF180 pathway gene expressions in tumor subpopulations, and show M39 marks ZNF180 high, MHC-I suppressed phenotype.
+
+```{r Tumor subpopulation dotplots}
+library(reshape2)
+## load function to generate dotplot data
+get_dotplot_pdata <- function(genes,cnt,mat,grp,cls)
+{
+  # genes =list of gene names for plotting
+  # cnt = count matrix
+  # mat = normalized expression matrix
+  # grp = character vector specifying group assignments for cells (e.g. case / control) 
+  # cls = character vector specifying cluster assignments for cells
+  gv = unique(grp)
+  cv = unique(cls)
+  
+  nc <- grp.vec <- cls.vec <- pct.expr <- mean.expr <- gene.name <- c() 
+  for (i in 1:length(genes))
+  {
+    cnt.g = as.vector(cnt[genes[i],]);names(cnt.g) = colnames(cnt)
+    mat.g = as.vector(mat[genes[i],]);names(mat.g) = colnames(mat)
+    for (n in 1:length(gv))
+    {
+      for (m in 1:length(cv))
+      {
+        ii = which(grp == gv[n] & cls == cv[m])
+        if (length(ii) > 0)
+        {
+          nc = c(nc,length(ii))
+          gene.name <- c(gene.name,genes[i])
+          grp.vec <- c(grp.vec,gv[n])
+          cls.vec <- c(cls.vec,cv[m])
+          pct.expr <- c(pct.expr,sum(cnt.g[ii] > 1E-320,na.rm = T)/length(ii) * 100)
+          mean.expr <- c(mean.expr,mean(mat.g[ii]))
+        }
+      }
+    }
+  }
+  out = data.frame(gene.name = gene.name,group.name = grp.vec,cluster.name = cls.vec,pct.express = pct.expr,mean.express = mean.expr,num.cell = nc)
+  return(out)
+}
+
+genes=c("MITF","MSH2","ATR","FANCM","ZNF180","CD274")
+cnt = GetAssayData(seu,assay = "SCT",slot = "counts")
+mat = GetAssayData(seu,assay = "SCT",slot = "data")
+cls = c();for (i in 1:length(tumor.mods)) cls = c(cls,rep(names(tumor.mods)[i],length(tumor.mods[[i]])))
+grp = seu@meta.data$treatment.group[match(do.call('c',tumor.mods),colnames(seu))]
+grp[grp == "post.treatment"] = "post-ICI";grp[grp == "treatment.naive"] = "ICI-naive"
+dot.pdat = get_dotplot_pdata(genes,cnt,mat,grp,cls)
+dot.pdat$parent.cluster = factor(tumor.parents[match(dot.pdat$cluster.name,names(tumor.mods))],levels = lvs[order(as.integer(gsub("^M","",lvs)))])
+
+dobj = ggplot(data = subset(dot.pdat,num.cell > 10),aes(y = gene.name,x = cluster.name,fill = mean.express,size = pct.express)) + 
+  geom_point(shape = 21,colour = "black") + facet_grid(group.name ~ .) + 
+  facet_grid(. ~ parent.cluster,scale = "free_x",space = "free_x") + 
+  #scale_x_discrete(limits = names(Texcl.score)) + 
+  scale_y_discrete(limit = genes) + 
+  guides(size = guide_legend(title = "%. Expressed"),fill = guide_colourbar(title = "Avg. Expression")) + 
+  scale_fill_gradient2(low = "green",mid = "white",high = "red",midpoint = 0.2) + theme_classic()  +
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(size = 14,angle = 45,vjust = 1,hjust = 1),
+        axis.text.y = element_text(size = 15),
+        axis.title.y = element_blank(),
+        strip.text = element_text(size = 16),
+        legend.position = "bottom",legend.direction = "horizontal")
+
+# create key gene marker expressions
+mrk.pdat = do.call('rbind.data.frame',lapply(msc.marker.list[names(msc.marker.list) %in% names(tumor.mods)],
+                                             function(x) subset(x,grepl("^AXL$|PDCD1LG2|CD274|HLA-A|HLA-B|HLA-C|ZNF180|^MSH2$|^FANCM$|^ATR$|^ATM$|MITF|HLA-DR|HLA-DP|HLA-DQ",gene.name))))
+
+# mark gene category
+vec = rep(NA,nrow(mrk.pdat))
+vec[grepl("HLA-A|HLA-B|HLA-C",mrk.pdat$gene.name)] = "MHC-I"
+vec[grepl("HLA-DR|HLA-DP|HLA-DQ",mrk.pdat$gene.name)] = "MHC-II"
+vec[grepl("CD274|PDCD1LG2",mrk.pdat$gene.name)] = "PD-L1/-L2"
+vec[grepl("ZNF180|MSH2|FANCM|ATR|ATM",mrk.pdat$gene.name)] = "ZNF180\ndriven\nDDR"
+vec[grepl("MITF|AXL",mrk.pdat$gene.name)] = "MITF/\nAXL"
+mrk.pdat$gene.category = factor(vec)
+mrk.pdat$parent.cluster = factor(tumor.parents[match(mrk.pdat$cluster.id,names(tumor.mods))],levels = lvs[order(as.integer(gsub("^M","",lvs)))])
+
+# create marker dotplot
+hobj = ggplot() + geom_point(data = mrk.pdat,aes(x = cluster.id,y = gene.name,fill = avg_log2FC,colour = p_val_adj < 0.05,size = 100*pct.1),shape = 21) + 
+  facet_grid(gene.category ~ parent.cluster,scale = "free",space = "free") + 
+  scale_fill_gradient2(low = "blue",mid = "white",high = "red",midpoint = 0) + 
+  guides(size = guide_legend(title = "%. Expressed",ncol = 2),
+         fill = guide_colorbar(title = "log2(Fold Change)",direction = "horizontal",barwidth = 10),
+         colour = guide_legend(title = "FDR < 0.05",ncol = 1)) + 
+  scale_colour_manual(values = c("TRUE" = "red","FALSE" = "grey")) + 
+  #scale_x_discrete(limits = names(Texcl.score)) + 
+  theme_classic() + 
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(size = 14,angle = 45,vjust = 1,hjust = 1),
+        axis.text.y = element_text(size = 15),
+        axis.title.y = element_blank(),
+        strip.text.y.right = element_text(size = 15,angle = 0),
+        strip.text.x.top = element_text(size = 15),
+        legend.position = "bottom",
+        legend.title = element_text(size = 16),legend.text = element_text(size = 13))
+
+print(hobj)
+```
+
+## Combine plots together
+
+```{r tumor summary}
+# combine figures
+library(patchwork)
+sobj.up = sobj.up + labs(title = "T-cell Exclusion Scores",y = "UP") + theme(axis.text.x = element_blank(),plot.title = element_text(size = 17,hjust = 0.5))
+sobj.dn = sobj.dn + theme() + labs(y = "DN")
+KD.up = KD.up + labs(y = "",title= "ZNF180-driven Suppression") + theme(axis.text.x = element_blank(),axis.title.y =  element_blank(),plot.title = element_text(size = 17,hjust = 0.5))
+KD.dn = KD.dn + labs(y = "",title = "ZNF180-driven Activation") + theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1,size = 15),axis.title.y =  element_blank(),plot.title = element_text(size = 17,hjust = 0.5))
+bobj = bobj + labs(title = "ICI status proportion") + theme(plot.title = element_text(size = 17,hjust = 0.5))
+
+# output figure
+#tiff(file = paste0(out.dir,"/Tumor_ICI_summary.tif"),res = 500,units = "in",width = 10,height = 15)
+#print((sobj.up/sobj.dn)/bobj/(KD.up/KD.dn)/hobj + plot_layout(height = c(1.5,1.5,2,2,6)))
+#dev.off()
+
+#pdf(file = paste0(out.dir,"/Tumor_ICI_summary.pdf"),width = 10,height = 15)
+print((sobj.up/sobj.dn)/bobj/(KD.up/KD.dn)/hobj + plot_layout(height = c(1.5,1.5,2,2,6)))
+#dev.off()
+
+library(cowplot)
+znf180.obj = plot_grid((sobj.up/sobj.dn),bobj,(KD.up/KD.dn),hobj,labels = c("A","B","C","D"),label_size = 24,rel_heights = c(1.2,0.9,1.2,2.5),ncol = 1,align = "v",axis="tblr") 
+
+png(file = paste0(out.dir,"/Tumor_ICI.png"),res = 500,width = 5500,height = 8900)
+print(znf180.obj)
+dev.off()
+
+
+```
