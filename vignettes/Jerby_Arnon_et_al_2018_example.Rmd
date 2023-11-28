@@ -12,9 +12,9 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # MSC applications to ICI-treated melanoma scRNA-seq
 
-This is R codes used to identify unique melanoma subpopulations resistant ICI, as shown in the manuscript. The pre-processed data in Seurat object format can be downloaded from [the synapse data repository (syn53012610)](https://www.synapse.org/#!Synapse:syn53012610). The data should be placed under "Data/melanoma_ICI" folder.
+This is R codes used to identify unique melanoma subpopulations resistant ICI, as shown in the manuscript. The pre-processed data in Seurat object format can be downloaded from NF Data Portal and on Synpase with DOI, [https://doi.org/10.7303/syn52966803](https://doi.org/10.7303/syn52966803), under Jerby_Arnon_et_al_2018 folder. These data should be placed under "Data/melanoma_ICI" folder.
 
-```{r Loading data}
+```{r Loading data, message = FALSE}
 rm(list = ls())
 library(Seurat)
 library(DESeq2)
@@ -51,7 +51,7 @@ seu@meta.data$cell.types.rename = vec
 
 Run MSC on the integrated data. The hierarchical marker calculation will identify subcluster markers, conditioned on the parent cluster. The marker calculation will take some time (\~ 10 min).
 
-```{r MSC workflow}
+```{r MSC workflow, message = FALSE}
 
 if (!file.exists(paste0(out.dir,"/MSC.results.RDS")))
 {
@@ -114,7 +114,7 @@ if (!file.exists(paste0(out.dir,"/MSC.markers.RDS")))
 
 ## Visualize the results in UMAP
 
-```{r UMAP visualization}
+```{r UMAP visualization, message = FALSE}
 #### Cluster results: 1st layer
 # get embedding coordinates
 xy = Embeddings(seu,"tsne")
@@ -197,7 +197,7 @@ plot_grid(pobj.trt,pobj.o,pobj.ct,ncol = 3)
 
 ## Visualize the cluster hierarchy and piecharts
 
-```{r piechart representations}
+```{r piechart representations, message = FALSE}
 ### Cluster hierarchy and lists
 library(ggpubr)
 htbl = subset(iter.res$pruned.table,module.size >= 30)[,c("cluster.name","parent.cluster")]
@@ -242,7 +242,7 @@ plot_grid(pie.ct,pie.trt,ncol = 2)
 ```
 
 ## Calculate cell type predictions
-```{r compare clusters to cell types}
+```{r compare clusters to cell types, message = FALSE}
 ## load other benchmark clustering results: codes to generate these results will be provided separately. 
 snn.out = readRDS("Data/melanoma_ICI/SNN.clusters.RDS")
 vec = readRDS(file = "Data/melanoma_ICI/SC3_clusters.RDS")
@@ -348,7 +348,7 @@ dev.off()
 
 ## Calculate T-cell exclusion score
 
-```{r T-cell exclusion score}
+```{r T-cell exclusion score, message = FALSE}
 ## load T-cell exclusion signature from the publication
 library(readxl)
 up.sig = read_excel(path = "Data/melanoma_ICI/mmc4.xlsx",sheet = 1,range = "A3:G18")
@@ -425,7 +425,7 @@ plot_grid(sobj.up,sobj.dn,ncol = 1)
 
 ## Calculate ZNF180 score
 
-```{r ZNF180 scores}
+```{r ZNF180 scores, message = FALSE}
 ### load ZNF180 KD signatures from publication data
 deg.tbl = read_excel(path = "Data/melanoma_ICI/41467_2021_21457_MOESM9_ESM.xlsx",sheet = 1,skip = 2)
 deg.tbl = subset(deg.tbl,!is.na(DEG.ID) & DEG.ID != "NA" & adj.P.Val < 0.05 & abs(logFC) > log2(1.2))
@@ -499,7 +499,7 @@ plot_grid(KD.up,KD.dn,ncol = 1)
 
 For each tumor cluster, the cell proportions of post-ICI/ICI-naive are plotted.
 
-```{r ICI proportion}
+```{r ICI proportion, message = FALSE}
 ### load functions for plotting
 # get proportion plot
 library(reshape)
@@ -563,7 +563,7 @@ print(bobj)
 
 We will show several ZNF180 pathway gene expressions in tumor subpopulations, and show M39 marks ZNF180 high, MHC-I suppressed phenotype.
 
-```{r Tumor subpopulation dotplots}
+```{r Tumor subpopulation dotplots, message = FALSE}
 library(reshape2)
 ## load function to generate dotplot data
 get_dotplot_pdata <- function(genes,cnt,mat,grp,cls)
@@ -661,7 +661,7 @@ print(hobj)
 
 ## Combine plots together
 
-```{r tumor summary}
+```{r tumor summary, message = FALSE}
 # combine figures
 library(patchwork)
 sobj.up = sobj.up + labs(title = "T-cell Exclusion Scores",y = "UP") + theme(axis.text.x = element_blank(),plot.title = element_text(size = 17,hjust = 0.5))

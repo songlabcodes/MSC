@@ -11,7 +11,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 #### MSC workflow Vignette with 8k PBMC data set
 
-This is a MSC workflow vignette using 8k PBMC single-cell RNA-seq data. The raw count data can be downloaded from <https://www.synapse.org/#!Synapse:syn52966803>. The downloaded data should be placed under folder named "Data/pbmc_8k", rooted on the working directory of choice. To save time, the processed data can also be downloaded from <https://www.synapse.org/#!Synapse:syn53009488>, and placed under "pbmc_8k" folder. This will bypass from [Section 1](#S1) to [Section 3](#S3).
+This is a MSC workflow vignette using 8k PBMC single-cell RNA-seq data. The raw count data can be downloaded NF from Data Portal and on Synpase with DOI, [https://doi.org/10.7303/syn52966803](https://doi.org/10.7303/syn52966803), under '8k_PBMC_10x_Counts' folder. The downloaded data should be placed under folder named "Data/pbmc_8k", rooted on the working directory of choice. To save time, the processed data can also be downloaded from the same [DOI link](https://doi.org/10.7303/syn52966803) in '8k_PBMC_Processed' folder, and should be placed under "pbmc_8k" folder. This will bypass from [Section 1](#S1) to [Section 3](#S3).
 
 Overall, the vignette is organized as follows:\
 [Section 1. Loading the data into SingleCellExperiment object](#S1);\
