@@ -132,15 +132,24 @@ get_mix_parameters = function(count, point = log10(1.01), ncores = 8){
     return(parslist)
 }
 
-get_dropout_rates <- function(mat,gene.names,ncores = 4)
+#' @title Dropout rate inference  
+#' @name get_dropout_rates
+#' @description Uses scImpute framework to estimate dropout rates per cell, per gene using Gamma-normal mixture model.
+#' @param mat single-cell count matrix log-normalized gene expression matrix to calculate the average expression levels.  
+#' @param gene.names rownames of the count matrix to run the dropout inference. 
+#' @return a matrix of inferred dropout rate per gene per cell. 
+#' @examples 
+#' # See Vignettes. 
+#' @export
+get_dropout_rates <- function(mat,gene.names)
 {
 	### mat is gene x cell count matrix
 	cat("-Normalize counts...\n")
-	count.norm = sclink_norm(count = t(mat), scale.factor = 1e6, filter.genes = FALSE, gene.names = gene.names)
-	count.norm = t(log10(10^count.norm - 1 + 1.01))
+	count.norm = sclink_norm(count = Matrix::t(mat), scale.factor = 1e6, filter.genes = FALSE, gene.names = gene.names)
+	count.norm = Matrix::t(log10(10^count.norm - 1 + 1.01))
 	
 	cat("-Fit gamma-normal mixture...\n")
-	pa = get_mix_parameters(count = count.norm, point = log10(1.01), ncores = ncores)
+	pa = get_mix_parameters(count = count.norm, point = log10(1.01), ncores = 1)
 	I = nrow(count.norm)
 	J= ncol(count.norm)
 
