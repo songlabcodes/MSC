@@ -1,6 +1,6 @@
 Package: MSC
 Title: Single-cell multi-scale clustering
-Version: 0.2.0
+Version: 0.2.1
 Authors@R: person("Won-Min", "Song", , "won-min.song@mssm.edu", role = c("aut", "cre"))
 Description: Given a cell-cell similarity measure, MSC package calculated locally embedded network (LEN) amongst the cells, and perform top-down iterative clustering to identify multi-scale clustering structures in single-cell transcriptome.
 License: GPL (>= 3)
