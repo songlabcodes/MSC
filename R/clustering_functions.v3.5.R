@@ -634,7 +634,7 @@ membership.to.mem <- function(membership)
   #' iter.res = iterative_clustering(g.in = pbmc_8k_msc_results$cell.network,alpha = alpha.val)
   #' }
   #' @export
-  iterative_clustering <- function(g.in,min.size = 10,d.func = function(x) sqrt(2*(1-x)),alpha = 1,pcut = 0.05,seed = 1234,ns.compact = 10000,nr.compact = 10)
+  iterative_clustering <- function(g.in,min.size = 10,d.func = function(x) sqrt(2*(1-x)),alpha = 1,pcut = 0.05,seed = 1234)
   {
     # initialize
     go = list(M0 = g.in)
@@ -686,31 +686,13 @@ membership.to.mem <- function(membership)
           mods = split(names(clsvec),clsvec)
           
           # global mst for compactness architecture
-          compact.m = sapply(mods,function(m,ns,nr) {
+          compact.m = sapply(mods,function(m) {
             g = induced_subgraph(gi,vids = m)
             g.mst = mst(graph = g,weights = d.func(E(g)$weight))
+            sp.dist = distances(graph = g.mst, v = V(g.mst), to = V(g.mst), mode = "all", weights = d.func(E(g.mst)$weight), algorithm = "bellman-ford")
+            mean(sp.dist[upper.tri(sp.dist)])/log(vcount(g.mst))^alpha
             
-            if (length(m) > ns)
-            {
-              # if too many nodes, sample to calculate
-              val = rep(NA,nr)
-              for (r in 1:nr)
-              {
-                v.sample = sample(V(g.mst)$name,ns)
-                sp.dist = distances(graph = g.mst, v = v.sample, to = v.sample, mode = "all", weights = d.func(E(g.mst)$weight), algorithm = "bellman-ford")
-                val[r] = mean(sp.dist[upper.tri(sp.dist)])/log(vcount(g.mst))^alpha
-                rm(sp.dist,v.sample)
-                gc()
-              }
-              out = mean(val,na.rm = T)
-            }else{
-              sp.dist = distances(graph = g.mst, v = V(g.mst), to = V(g.mst), mode = "all", weights = d.func(E(g.mst)$weight), algorithm = "bellman-ford")
-              out = mean(sp.dist[upper.tri(sp.dist)])/log(vcount(g.mst))^alpha
-              rm(sp.dist)
-              gc()
-            }
-            return(out)
-          },ns = ns.compact,nr = nr.compact)
+          })
           
           module.stat = data.frame(cluster.name = names(mods),module.size = sapply(mods,length),cluster.resolution = rep(NA,length(mods)),
                                    compactness.resolution = rep(alpha,length(mods)),
@@ -1064,6 +1046,16 @@ msc_workflow <- function(dat,bcnt,n.cores = 4,min.cells = 5,
     cout = components(hg)
     mids = names(cout$membership)[cout$membership == cout$membership["M0"]]
     sig.table = subset(sig.table,cluster.name %in% mids)
+    
+    # further remove top parents with singular child
+    hg = graph.data.frame(sig.table[,c("cluster.name","parent.cluster")])
+    
+    k.in = igraph::degree(hg,mode = "in")
+    k.out = igraph::degree(hg,mode = "out")
+    
+    mid.remove = intersect(names(k.in)[k.in == 1], names(k.out)[k.out == 0])
+    
+    sig.table = subset(sig.table,!(parent.cluster %in% mid.remove))
   
     iter.res$pruned.table = sig.table
     return(iter.res)
