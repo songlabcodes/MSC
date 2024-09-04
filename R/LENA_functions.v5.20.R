@@ -322,7 +322,7 @@ calculate_LEN.v3 <- function(mat,bcnt,
   
   # symmetrize adjacency
   adj = sparseMatrix(i = match(el$row,colnames(mat)),j = match(el$col,colnames(mat)),x = el$weight,dims = c(ncol(mat),ncol(mat)),dimnames = list(colnames(mat),colnames(mat)))
-  adj = adj + t(adj)		
+  adj = adj + Matrix::t(adj)		
   
   ### get fractional ranking
   ptm <- proc.time()
@@ -595,12 +595,23 @@ generate_cell_network.wt.loess <- function(mat,bcnt,dist.func,is.decreasing,n.co
   dat.el.o = subset(dat.el,!is.low.weight)
   go = graph.data.frame(dat.el.o,directed = FALSE)
   
+  
   edge.bet = edge_betweenness(
     graph = go,
     directed = FALSE,
-    weights = NULL,
+    weights = rep(1,ecount(go)),
     cutoff = 3
   )
+  
+  if (sum(edge.bet) < ecount(go))
+  {
+    edge.bet = edge_betweenness(
+      graph = go,
+      directed = FALSE,
+      weights = rep(1,ecount(go)),
+      cutoff = -1
+    )
+  }
   
   edge.bet.log = log(edge.bet + 1)
   zscore = scale(edge.bet.log)
