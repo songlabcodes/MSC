@@ -3,6 +3,9 @@
 **Developmental version of MSC**: This github page contains developmental version of R package for Multi-scale clustering (MSC) to perform single-cell transcriptome clustering. The manuscript is currently under review.
 
 ### Installation:
+MEGENA needs to be installed, prior to MSC installation: 
+library(devtools);
+install_github("songw01/MEGENA");
 
 For installation for developmental github version:  
 library(devtools);  
