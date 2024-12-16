@@ -1,0 +1,478 @@
+---
+title: "pipeComp evaluation"
+author: "Won-Min Song"
+date: '2024-12-13'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Comparative analysis of MSC and other benchmark clustering methods
+This is the R script used to perform comparative analysis of MSC with other benchmark methods with pipeComp data sets. These data sets have gold-standard ground-truth clusters, and the raw count matrix and pre-processed data by Seurat workflow can be downloaded from Synpase with DOI, [https://doi.org/10.7303/syn52966803](https://doi.org/10.7303/syn52966803), under 'pipeComp' folder. 
+
+[Section 1. pipeComp data pre-processing](#S1): The 'Data' subfolder contains the raw count matrices in .RDS format, and the pre-processed data is in 'quality_controlled_seurat.results.RDS' in the main folder in .RDS format, a gzipped format of R objects. Placing  'quality_controlled_seurat.results.RDS' in the working folder will bypass [Section 1](#S1).;\
+[Section 2. Calculate clusters using benchmark methods](#S2): The main folder contains .RDS files to hold results for individual benchmark methods. Placing "single_layer_cluster_results.RDS" in the working folder will bypass this section.;\
+[Section 3. Calculate clusters using MSC](#S3): The main folder contains .RDS files to hold MSC results from Pearson's correlation (iterative_MSC.correlation.results.RDS) and Euclidean distance (iterative_MSC.euclidean.results.RDS). Also, this section will generate results from the single-layer split by AdaptSplit without performing the iterative top-down approach. The discrete clustering results from the ADaptSplit can also be obtained from the Synapse repository (Pearson's correlation-based results: adaptsplit.correlation.results.RDS, Euclidean distance-based results: adaptsplit.euclidean.results.RDS). ;\
+[Section 4. Comparative evaluation of discrete partitions using adjusted Rand Index](#S4): This section reproduces the figures to calculate the adjusted Rand Index on single-layer clustering results including CIDR, SC3, SNN-based Louvain clustering and AdaptSplit;\
+[Section 5. Comparative evaluation of iterative top-down clustering results](#S5): This section reproduces the figures to calculate inclusion, coverage rates and detection accuracy for performance metrics in the gold standard clusters.;\ 
+
+## [Section 1. pipeComp data pre-processing]{#S1}
+
+```{r pre-processing, message = FALSE}
+rm(list = ls())
+
+library(Seurat)
+library(scater)
+library(scran)
+library(cowplot)
+library(CIDER)
+library(cidr)
+library(mclust)
+library(MSC)
+library(Matrix)
+library(doParallel)
+library(igraph)
+library(SC3)
+
+#### Set up folders
+root.dir <- "/home/won-min/Documents/R_packages/Single_Cell_Clustering/pipeComp_v3";setwd(root.dir)
+out.dir = "Results";dir.create(out.dir) # set up output folders
+
+min.size = 5 # minimum cell cluster size
+n.cores = 6 # number of cores to use
+
+run.preprocess = FALSE # set this FALSE if 'quality_controlled_seurat.results.RDS' is already downloaded in the working folder. 
+run.clustering = FALSE # set FALSE if want to bypass the clustering process. 
+
+#### load pipeComp data collection and use Seurat workflow for pre-processing. 
+if (run.preprocess)
+{
+  #############
+  simfiles <- list.files(path = "pipeComp/Data",full.names = TRUE)
+  names(simfiles) = gsub("^(.*)/|\\.SCE\\.rds","",simfiles)
+  seu.list = vector("list",length(simfiles));names(seu.list) = names(simfiles)
+  for (i in 1:length(simfiles))
+  {
+    sce= readRDS(file = simfiles[i])
+    seu = CreateSeuratObject(counts = counts(sce),meta.data = as.data.frame(colData(sce)))
+    if (any(colnames(seu@meta.data) == "pldf.class")) 
+    {
+      seu = subset(seu,pldf.class == "singlet" & pct_counts_Mt <= 20 & total_features >= 100)
+    }else{
+      seu = subset(seu,pct_counts_Mt <= 20 & total_features >= 100)
+    }
+    seu <- NormalizeData(seu)
+    #seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 3000)
+    seu <- ScaleData(seu)
+    VariableFeatures(seu) = rownames(subset(qc.results[[i]]$gene.data,bio > tech & p.value < 0.05))
+    seu = RunPCA(seu,npcs = 20)
+    seu.list[[i]] = seu;
+    rm(seu)
+  }
+  
+  saveRDS(seu.list,file = "quality_controlled_seurat.results.RDS")
+}else{
+  seu.list = readRDS("quality_controlled_seurat.results.RDS")
+}
+
+```
+
+## [Section 2. Calculate clusters using benchmark methods]{#S2}
+
+```{r cluster analysis, message = FALSE}
+##### Create functions for generating the benchmark clusters
+if (run.clustering)
+{
+  # get SNN-based clusters at different resolutions: 0.4,0.8 and 1.2
+  get_snn_clusters <- function(seu,resol.vec = seq(0.4,1.2,0.4))
+  {
+    seu <- FindNeighbors(seu)
+    seu <- FindClusters(seu, resolution = resol.vec)
+    seu.cls.col = colnames(seu@meta.data)[grep("snn_res",colnames(seu@meta.data))]
+    
+    snn.data = seu@meta.data[,seu.cls.col]
+    rownames(snn.data) = colnames(seu)
+    colnames(snn.data) = gsub("^(.*)_snn_res","seurat_snn_res",colnames(snn.data))
+    snn.mods = lapply(snn.data,function(x) split(rownames(snn.data),factor(x)))
+    
+    for (i in 1:length(seu.cls.col))
+    {
+      names(snn.mods[[i]]) = paste0(names(snn.mods)[i],"_C",names(snn.mods[[i]]))
+    }
+    names(snn.mods) = NULL
+    snn.mods = do.call('c',snn.mods)
+    
+    output = list(modules = snn.mods,cluster.matrix = snn.data)
+    
+    return(output)
+  }
+  # get CIDR results
+  run_cidr <- function(tags)
+  {
+    require(cidr)
+    #grp = unique(sce$phenoid)
+    #cmap = rainbow(length(grp));names(cmap)=grp
+    #cols = cmap[sce$phenoid];
+    sData <- scDataConstructor(tags)
+    sData <- determineDropoutCandidates(sData)
+    sData <- wThreshold(sData)
+    sData <- scDissim(sData)
+    sData <- scPCA(sData)
+    
+    sData <- nPC(sData)
+    nCluster(sData)
+    
+    sData <- scCluster(sData)
+    
+    return(sData)
+  }
+  # run SC3
+  run_benchmark_clusters <- function(seu,n.cores = 4,dimred = "pca",dims = 1:10,sc3.seed = 1234)
+  {
+  	
+  	## SC3
+  	library(SC3)
+  	sce = as.SingleCellExperiment(seu)
+  	rowData(sce)$feature_symbol = rownames(sce)
+  	counts(sce) = as.matrix(counts(sce))
+  	logcounts(sce) = as.matrix(logcounts(sce))
+  	set.seed(sc3.seed)
+  	sce = sc3(object = sce,k_estimator = TRUE,biology = FALSE,n_cores = n.cores)
+  
+  	seu@meta.data$SC3_clusters = colData(sce)[[grep("^sc3_",colnames(colData(sce)))]]
+  	
+  	return(seu)
+  }
+  
+  # load pre-processed file if section 1 wasn't run
+  if (!any(ls() == "seu.list")) seu.list = readRDS("quality_controlled_seurat.results.RDS")
+  
+  #### run analysis: SNN-based Louvain, SC3 and CIDR
+  snn.results = sc3.lst = cidr.lst = vector("list",length(seu.list));
+  names(snn.results) = names(sc3.lst) = names(cidr.lst) = names(seu.list)
+  for (i in 1:length(simfiles))
+  {
+    seu = seu.list[[i]]
+    nc = min(c(20,ncol(Embeddings(seu,"pca"))))
+    
+    # run SNN-based Louvain clustering 
+    snn.results[[i]] = get_snn_clusters(seu,resol.vec = c(0.4,0.8,1.2))
+    
+    # SC3 clustering
+    bench.out = run_benchmark_clusters(seu,n.cores = n.cores,dimred = "pca",dims = 1:nc,sc3.seed = 1234)
+    vec = bench.out@meta.data$SC3_clusters;names(vec) = colnames(seu)
+    sc3.lst[[i]] = vec;
+    rm(vec)
+    
+    
+    #### add cidr results
+    cidr.obj = run_cidr(tags = as.matrix(GetAssayData(seu,layer = "counts")))
+    cidr.res = factor(cidr.obj@clusters);names(cidr.res) = colnames(seu)
+    cidr.lst[[i]] = cidr.res
+    rm(bench.out,seu,cidr.obj,cidr.res)
+  }
+}
+
+```
+
+## [Section 3. Calculate clusters using MSC]{#S3}
+
+```{r MSC, message = FALSE}
+
+if (run.clustering)
+{
+  # load pre-processed file if section 1 wasn't run
+  if (!any(ls() == "seu.list")) seu.list = readRDS("quality_controlled_seurat.results.RDS")
+  
+  #### run analysis: MSC-Euclidean. Will get full clustering as well as AdaptSplit results in Euclidean metrics.
+  lena.euclid.results = split.euclid.results = vector("list",length(seu.list))
+  names(lena.euclid.results) = names(split.euclid.results) = names(seu.list)
+    
+  for (i in 1:length(seu.list))
+  {
+    cat(paste0("processing:",names(seu.list)[i],"\n"))
+    mat = as.matrix(t(Embeddings(seu.list[[i]],"pca")))
+    if (T)
+    {
+      # get LEN
+      len.out = generate_cell_network.wt.loess(
+        mat,
+        bcnt = NULL,
+        dist.func = function(x,y) sqrt(sum((x-y)^2)),
+        is.decreasing = FALSE,
+        n.cores = 4
+      );
+      
+      
+      # run MSC
+      d.func = function(x) x
+  
+      cout = components(len.out)
+      ci = which(cout$csize > log(vcount(len.out)))
+      glst = lapply(ci,function(n) induced_subgraph(graph = len.out,vids = names(cout$membership)[cout$membership == n]))
+      alpha.res = sapply(glst,function(gi) identify_scale_parameter(g = gi,nv = 20,nr.max = 3,seed = 1234,d.func = d.func,mode = "diameter"))[1]
+      gc()
+        
+      iter.res = iterative_clustering(g.in = len.out,min.size = 5,d.func = d.func,alpha = alpha.res)
+        
+      lena.euclid.results[[i]] = iter.res
+        
+    }
+      
+    
+    ### get adapt split results
+    # find root
+    gh = graph.data.frame(iter.res$module.table[,c("parent.cluster","cluster.name")],directed = T)
+    deg = igraph::degree(gh,mode = "in");rid = names(deg)[deg == 0];
+    pid = sapply(iter.res$modules,length)[rid];pid = names(pid)[which.max(pid)]
+    vec = get_rooted_membership(mtbl = iter.res$module.table,modules = iter.res$modules,pid = pid,bg = colnames(mat))
+    split.euclid.results[[i]] = vec
+    rm(cout,cu,glst,alpha.res,iter.res,len.out)
+  }
+  
+  #### run analysis: MSC-Pearson. Will get full clustering as well as AdaptSplit results in Pearson correlation.
+  lena.cor.results = split.cor.results = vector("list",length(qc.results))
+  names(lena.cor.results) = names(split.cor.results) = names(qc.results)
+  for (i in 1:length(seu.list))
+  {
+    cat(paste0("processing:",names(seu.list)[i],"\n"))
+    
+    ### run MSC clustering
+    # for imputed data for correlation computation 
+    feats = rownames(subset(qc.results[[i]]$gene.data,bio > tech & p.value < 0.05))
+    cat(paste0("- #. features:",length(feats),"\n"))
+    dat = GetAssayData(seu.list[[i]],layer = "data")
+    dat = dat[feats,]
+    bcnt = GetAssayData(seu.list[[i]],layer = "counts")
+    bcnt = bcnt[rownames(dat),]
+    
+    # get LEN
+    len.out = generate_cell_network.wt.loess(
+      mat = dat,
+      bcnt = bcnt,
+      dist.func = function(a, b) cor(a,b,method ="pearson"),
+      is.decreasing = TRUE,
+      n.cores = 4
+    );
+    
+    # run MSC
+    d.func = function(x) sqrt(2*(1-x))
+  
+    cout = components(len.out)
+    ci = which(cout$csize > log(vcount(len.out)))
+    glst = lapply(ci,function(n) induced_subgraph(graph = len.out,vids = names(cout$membership)[cout$membership == n]))
+      
+    alpha.res = sapply(glst,function(gi) identify_scale_parameter(g = gi,nv = 20,nr.max = 3,seed = 1234,d.func = d.func,mode = "diameter"))[1]
+    gc()
+      
+    iter.res = iterative_clustering(g.in = len.out,min.size = 5,d.func = d.func,alpha = alpha.res)
+      
+    lena.cor.results[[i]] = iter.res
+      
+    ### get adapt split results
+    # find root
+    gh = graph.data.frame(iter.res$module.table[,c("parent.cluster","cluster.name")],directed = T)
+    deg = igraph::degree(gh,mode = "in");rid = names(deg)[deg == 0];
+    pid = sapply(iter.res$modules,length)[rid];pid = names(pid)[which.max(pid)]
+    vec = get_rooted_membership(mtbl = iter.res$module.table,modules = iter.res$modules,pid = pid,bg = colnames(seu.list[[i]]))
+    split.cor.results[[i]] = vec
+    rm(cout,cu,glst,alpha.res,iter.res,len.out)
+  }
+  
+  # put results into a single matrix per data set for single-layer clusters
+  clus.results.layer = vector("list",length(seu.list));names(clus.results.layer) = names(seu.list)
+  for (i in 1:length(seu.list))
+  {
+    snn.res = snn.results[[i]]$cluster.matrix
+    clus.data = data.frame(cell.id = seu.list[[i]]@meta.data$orig.ident,phenoid = seu.list[[i]]@meta.data$phenoid,
+                           as.data.frame(snn.res[match(colnames(seu.list[[i]]),rownames(snn.res)),]))
+    clus.data$SC3 = sc3.lst[[i]][colnames(seu.list[[i]])]
+    clus.data$CIDR = cidr.lst[[i]][colnames(seu.list[[i]])]
+    clus.data$AdaptSplit.Euclidean = split.euclid.results[[i]][colnames(seu.list[[i]])]
+    clus.data$AdaptSplit.Correlation = split.cor.results[[i]][colnames(seu.list[[i]])]
+    clus.results.layer[[i]] = clus.data;
+    rm(clus.data)
+  }
+
+}
+
+
+```
+
+## [Section 4. Comparative evaluation of discrete partitions using adjusted Rand Index]{#S4}
+```{r adjusted rand index, message = FALSE}
+# load inputs
+if (!any(ls() == "seu.list")) seu.list = readRDS("quality_controlled_seurat.results.RDS")
+if (!any(ls() == "clus.results.layer")) clus.results.layer = readRDS("single_layer_cluster_results.RDS")
+
+# calculate adjusted rand index
+adj.matrix = matrix(0,nrow = length(seu.list),ncol = 7)
+rownames(adj.matrix) = names(seu.list)
+for (i in 1:length(clus.results.layer))
+{
+  clus.res.f = clus.results.layer[[i]]
+  adj.vec = sapply(clus.res.f[,grepl("snn|SC3|CIDR|AdaptSplit",colnames(clus.res.f))],function(x) adjustedRandIndex(x = clus.res.f$phenoid,y = x))
+  adj.matrix[i,] = adj.vec
+  if (i == 1) colnames(adj.matrix) = colnames(clus.res.f)[3:ncol(clus.res.f)]
+}
+  
+# plot out results
+adjr.matrix = adj.matrix
+# rename methods for simpler names
+colnames(adjr.matrix) = c("SNN r=0.4","SNN r=0.8","SNN r=1.2","SC3","CIDR","AdaptSplit:Euclidean","AdaptSplit:Correlation")
+adjr.matrix = cbind(apply(adjr.matrix[,1:3],1,max),adjr.matrix)
+colnames(adjr.matrix)[1] = "SNN Best"
+
+library(ggbeeswarm)
+library(reshape)
+pdata = melt(adjr.matrix);colnames(pdata) = c("data.id","method","adjusted.rand")
+levels(pdata$method)[levels(pdata$method) == "MSC:1st Split"] = "MSC:AdaptSplit" 
+pobj.1 = ggplot(data = pdata) + 
+  geom_bar(aes(x = data.id,y = adjusted.rand,,fill = method),stat = "identity",position = "dodge",colour = "black") + theme_bw() + 
+  labs(x = "Data ID",y = "Adjusted Rand Index") + 
+  guides(fill = guide_legend(title = "Method",ncol = 4),colour = "none") + 
+  theme(axis.text.x = element_text(size = 18,angle = 45,vjust = 1,hjust = 1),axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 20),
+        axis.title.x = element_blank(),
+        legend.title = element_text(size = 19),legend.text = element_text(size = 15),
+        plot.subtitle = element_text(size = 27,face = "bold",hjust = -0.05),
+        legend.position = "bottom")
+
+pobj.2 = ggplot() + geom_quasirandom(data = pdata,aes(x = method,y = adjusted.rand,colour = data.id)) +
+  labs(x = "Methods",y = "Adjusted Rand Index") + 
+  guides(colour = guide_legend(title = "Data ID",ncol = 3)) + 
+  geom_boxplot(data = pdata,aes(x = method,y = adjusted.rand),width = 0.2,alpha = 0.2) + theme_bw() + 
+  theme(axis.text.x = element_text(size = 16,angle = 45,vjust = 1,hjust = 1),axis.text.y = element_text(size = 17),
+        axis.title = element_text(size = 20),legend.title = element_text(size = 19),legend.text = element_text(size = 15),
+        plot.subtitle = element_text(size = 27,face = "bold",hjust = -0.05),
+        legend.position = "bottom")
+
+library(cowplot)
+print(plot_grid(pobj.1,pobj.2))
+
+
+  
+```
+
+## [Section 5. Comparative evaluation of iterative top-down clustering results]{#S5}
+```{r evaluation, echo=FALSE}
+
+if (!any(ls() == "clus.results.layer")) clus.results.layer = readRDS("single_layer_cluster_results.RDS")
+
+bench.names = c("seurat_snn.0.4", "seurat_snn.0.8", "seurat_snn.1.2", "SC3s","CIDR")
+mod.bench.lst = lapply(clus.results.layer,function(x) lapply(x[,bench.names],function(y) split(rownames(x),factor(y))))
+
+if (!any(ls() == "lena.cor.results")) lena.cor.results = readRDS("iterative_MSC.correlation.results.RDS")
+if (!any(ls() == "lena.euclid.results")) lena.euclid.results = readRDS("iterative_MSC.euclidean.results.RDS")
+
+incl.vec = covr.vec = matrix(NA,ncol = length(seu.list),nrow = 7);colnames(incl.vec) = colnames(covr.vec) = names(seu.list)
+detection.lst = vector("list",length(seu.list));names(detection.lst) = names(seu.list)
+for (i in 1:length(seu.list))
+{
+  mod.true = split(colnames(seu.list[[i]]),seu.list[[i]]@meta.data$phenoid);cls.true = seu.list[[i]]@meta.data$phenoid;names(cls.true) = colnames(seu.list[[i]])
+  mod.lena.cor = lena.cor.results[[i]]$modules;mod.lena.cor = mod.lena.cor[sapply(mod.lena.cor,length) >= min.size];mod.lena.cor=mod.lena.cor[which(names(mod.lena.cor) != "M0")]
+  mod.lena.euc = lena.euclid.results[[i]]$modules;mod.lena.euc = mod.lena.euc[sapply(mod.lena.euc,length) >= min.size];mod.lena.euc=mod.lena.euc[which(names(mod.lena.euc) != "M0")]
+  mod.bench = mod.bench.lst[[i]]
+  mod.calc = c(mod.bench,list("MSC:Euclidean" = mod.lena.euc,"MSC:Correlation" = mod.lena.cor))
+  
+  if (i == 1) rownames(incl.vec) = rownames(covr.vec) = names(mod.calc)
+  incl.vec[,i] = sapply(mod.calc,function(x) inclusion_rate(mod.o = mod.true,mod.f = x))
+  covr.vec[,i] = sapply(mod.calc,function(x) coverage_rate(mod.o = mod.true,mod.f = x))
+  detection.lst[[i]] = do.call('cbind',lapply(mod.calc,function(x) apply(calculate_jaccard(mod.true,mod.f = x),1,max)))
+  
+  rm(mod.true,mod.lena.cor,mod.lena.euc,mod.bench,mod.calc)
+}
+
+
+library(reshape)
+pdat.incl = melt(incl.vec);colnames(pdat.incl) = c("method","data.id","inclusion.rate")
+pdat.incl$method = gsub("CIDER","CIDR",gsub("LENA","MSC",gsub("SC3s","SC3",gsub("seurat_snn\\.","SNN, \u03B3=",pdat.incl$method))))
+pdat.covr = melt(covr.vec);colnames(pdat.covr) = c("method","data.id","coverage.rate")
+pdat.covr$method = gsub("CIDER","CIDR",gsub("LENA","MSC",gsub("SC3s","SC3",gsub("seurat_snn\\.","SNN, \u03B3=",pdat.covr$method))))
+
+incl.obj = ggplot(data = pdat.incl) +
+  geom_quasirandom(aes(colour = factor(data.id),x = method,y = inclusion.rate),dodge.width = 0.75,alpha = 0.6) + 
+  geom_boxplot(aes(x = method,y = inclusion.rate),alpha = 0.2,outlier.colour = NA,width = 0.25) + 
+  #stat_summary(aes(x = factor(data.id),group = method,colour = method,y = detection.rate),geom = "line",fun = function(x) mean(x)) + 
+  #stat_summary(aes(x = factor(data.id),colour = method,y = detection.rate),geom = "errorbar",fun.data = mean_se,width = 0.2,dodge.width = 0.75) + 
+  labs(y = "Inclusion Rate") + 
+  guides(colour = "none",fill = guide_legend(title = "Data ID",ncol = 3)) +
+  theme_bw() + 
+  theme(axis.text.x = element_text(size = 14,angle=45,vjust = 1,hjust = 1),
+        axis.text.y = element_text(size = 14),
+        axis.title.y = element_text(size = 17),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size = 20,hjust = 0.5),
+        plot.subtitle = element_text(size = 27,face = "bold",hjust = -0.05),
+        legend.title = element_text(size = 17),legend.text = element_text(size = 13),
+        legend.position = "bottom")
+covr.obj = ggplot(data = pdat.covr) +
+  geom_quasirandom(aes(colour = factor(data.id),x = method,y = coverage.rate),dodge.width = 0.75,alpha = 0.6) + 
+  geom_boxplot(aes(x = method,y = coverage.rate),alpha = 0.2,outlier.colour = NA,width = 0.25) + 
+  #stat_summary(aes(x = factor(data.id),group = method,colour = method,y = detection.rate),geom = "line",fun = function(x) mean(x)) + 
+  #stat_summary(aes(x = factor(data.id),colour = method,y = detection.rate),geom = "errorbar",fun.data = mean_se,width = 0.2,dodge.width = 0.75) + 
+  labs(y = "Coverage Rate") + 
+  guides(colour = "none",fill = guide_legend(title = "Data ID",ncol = 3)) +
+  theme_bw() + 
+  theme(axis.text.x = element_text(size = 14,angle=45,vjust = 1,hjust = 1),
+        axis.text.y = element_text(size = 14),
+        axis.title.y = element_text(size = 17),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size = 20,hjust = 0.5),
+        plot.subtitle = element_text(size = 27,face = "bold",hjust = -0.05),
+        legend.title = element_text(size = 17),legend.text = element_text(size = 13),
+        legend.position = "bottom")
+
+incl.obj = incl.obj + theme(axis.text.x = element_blank())
+covr.obj = covr.obj + theme(axis.text.x = element_blank())
+
+
+## plot detection rates
+plot.data = data.frame()
+for (i in 1:length(seu.list))
+{
+  mod.true = split(colnames(seu.list[[i]]),seu.list[[i]]@meta.data$phenoid);
+  len = sapply(mod.true,length)
+  
+  detect.m = detection.lst[[i]]
+  pdat = do.call('rbind.data.frame',lapply(1:ncol(detect.m),function(x) data.frame(method = rep(colnames(detect.m)[x],nrow(detect.m)),detection.rate = detect.m[,x],nrep = rep(i,nrow(detect.m)),cluster.id = rownames(detect.m))))
+  pdat$cluster.size = len[match(pdat$cluster.id,names(len))]
+  pdat$data.id = rep(names(detection.lst)[i],nrow(pdat))
+  plot.data = rbind.data.frame(plot.data,pdat)
+  rm(detect.m,len,pdat)
+}
+
+plot.data$method = gsub("CIDER","CIDR",gsub("LENA","MSC",gsub("SC3s","SC3",gsub("seurat_snn\\.","SNN, \u03B3=",plot.data$method))))
+
+## plot weighted sum of accuracy
+library(dplyr)
+sum.data = plot.data %>% group_by(method,data.id) %>% summarize(overall.detection.rate = sum(detection.rate*cluster.size)/sum(cluster.size))
+
+acr.obj = ggplot(data = sum.data) + geom_quasirandom(aes(x = method,colour= data.id,y = overall.detection.rate),dodge.width = 0.35,alpha = 0.6) + 
+  geom_boxplot(aes(x = method,y = overall.detection.rate),alpha = 0.2,outlier.colour = NA,width =0.2) + 
+  labs(y = "Detection Accuracy") + 
+  guides(colour = guide_legend(title = "Data ID",ncol = 3)) +
+  theme_bw() + 
+  theme(axis.text.x = element_text(size = 14,angle=45,vjust = 1,hjust = 1),
+        axis.text.y = element_text(size = 14),
+        axis.title.y = element_text(size = 17),
+        axis.title.x = element_blank(),
+        plot.title = element_text(size = 20,hjust = 0.5),
+        plot.subtitle = element_text(size = 27,face = "bold",hjust = -0.05),
+        legend.title = element_text(size = 17),legend.text = element_text(size = 13),
+        legend.position = "bottom")
+
+## combine plots
+library(patchwork)
+incl.obj = incl.obj + theme(axis.text.x = element_blank())
+covr.obj = covr.obj + theme(axis.text.x = element_blank())
+
+metric.obj = incl.obj/covr.obj/acr.obj
+
+print(metric.obj)
+
+
+```
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

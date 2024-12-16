@@ -1,0 +1,403 @@
+---
+title: "Lee et al. 2020 Analysis"
+author: "Won-Min Song"
+date: '2024-12-16'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### MSC analysis of single-cell transcriptome of influenza/COVID-19 infected PBMC
+This is the R script used to reproduce Figure 5 of the MSC manuscript to analyze influenza/COVID-19 infected PBMC scRNA-seq from Lee et al. 2020. The pre-processed data by Seurat workflow (integrated_data.seurat_wt_celltype.RDS), SNN-based results (SNN.clusters.RDS), MSC results (Flu.MSC_results.RDS) and codes for enrichment test (enrichment_functions.v3.R) and evaluation metric (evaluation_functions.R) can be downloaded from Synpase with DOI, [https://doi.org/10.7303/syn52966803](https://doi.org/10.7303/syn52966803), under 'Lee_et_al_2020' folder. Placing these files under the working directory will run the codes below.
+
+## [Section 1. Loading data]{#S1}
+```{r data load}
+# set up the working directory
+setwd("/media/won-min/My Passport1/SingleCell/InfectiousDisease/Flu_and_COVID19/Lee_et_al")
+
+# packages
+library(Seurat)
+library(ggraph)
+library(MSC)
+library(ggplot2)
+library(cowplot)
+library(patchwork)
+
+# load functions
+if (file.exists("enrichment_functions.v3.R")) source("enrichment_functions.v3.R")
+if (file.exists("evaluation_functions.R")) source("evaluation_functions.R")
+
+# load the pre-processed Seurat object
+seu = readRDS("integrated_data.seurat_wt_celltype.RDS")
+
+# load MSC results
+iter.res = readRDS("Flu.MSC_results.RDS")
+iter.res = prune_hierarchy.compact(iter.res)
+
+# load SNN results for comparison
+snn.out = readRDS("SNN.clusters.RDS")
+
+# update infection group
+vec = seu@meta.data$subject.group
+ii = which(!is.na(seu@meta.data$subject.status))
+vec[ii] = seu@meta.data$subject.status[ii]
+seu@meta.data$subject.group.name = factor(vec)
+
+disease.col = c("healthy control" = "chartreuse1","Influenza patient" = "darkorchid1",
+                "Asymptomatic case of COVID-19 patient" = "pink",
+                "mild COVID-19 patient" = "deeppink",
+                "severe COVID-19 patient" = "red")
+```
+
+## [Section 2. Identification of detected cell types in cell clusters]{#S2}
+``` {r cell type comparisons}
+
+##### map cell types to cluster
+vec = seu@meta.data$inferred.cell.type.fine;
+names(vec) = colnames(seu)
+
+# filter for cells with valid size
+tbl = table(vec);
+valid.cells = names(tbl)[tbl >= 100]
+vec[!(vec %in% valid.cells)] = NA
+tbl = tbl[valid.cells]
+
+jac = calculate_jaccard(mod.o = split(names(vec),vec),mod.f = iter.res$modules[iter.res$pruned.table$cluster.name])
+
+snn.matrix = snn.out$cluster.matrix[,c(1,3,5)]
+jac.snn = apply(snn.matrix,2,function(x) calculate_jaccard(mod.o = split(names(vec),vec),mod.f = split(names(x),x)))
+max.rates = do.call('rbind',lapply(c(list(MSC = jac),jac.snn),function(x) apply(x,1,max)))
+
+thval = seq(0.5,1,0.05)
+detected.type = apply(max.rates,1,function(x) sapply(thval,function(y) sum(x >= y,na.rm = TRUE)))
+colnames(detected.type) = gsub("seurat_snn_res\\.","SNN \u03B3=",colnames(detected.type))
+
+det.data = data.frame()
+for (i in 1:ncol(detected.type)) 
+{
+  df = data.frame(cutoff = thval,num.detect = detected.type[,i],method = rep(colnames(detected.type)[i],length(thval)))
+  det.data = rbind.data.frame(det.data,df)
+  rm(df)
+}
+
+det.obj = ggplot(data = det.data,aes(x = factor(cutoff,levels = thval),y = method,fill = num.detect)) + geom_tile() +
+  geom_text(aes(label = num.detect),size= 5) + 
+  scale_y_discrete(limits = colnames(detected.type)) + 
+  scale_fill_gradient(low = "yellow",high = "red") + 
+  labs(x = "Detection Thresholds",subtitle = "#. of Detected Sub-populations") + 
+  guides(fill = guide_colourbar(title = "#. Detected")) +
+  theme_classic() + 
+  theme(axis.title.y = element_blank(),axis.text.x = element_text(size = 14,angle = 45,vjust = 1,hjust = 1),
+        plot.subtitle = element_text(size = 19,hjust = 0.5,face ="bold"),
+        axis.title.x = element_text(size = 17),axis.text.y = element_text(size = 14),
+        legend.title = element_text(size = 17),legend.text = element_text(size = 13))
+
+print(det.obj)
+
+
+```
+
+## [Section 3. UMAP plots]{#S3}
+```{r UMAP, echo=FALSE}
+library(cowplot)
+library(ggplot2)
+library(ggrepel)
+library(patchwork)
+
+# coordinate by umap
+xy = Embeddings(seu,"umap")
+
+## get major cell type plots
+vec = seu@meta.data$inferred.cell.type.broad;names(vec) = colnames(seu);
+vec = vec[rownames(xy)];
+singleton = names(table(vec))[table(vec) <= 10]
+vec[vec %in% singleton] = NA
+pobj.ct.broad = plot_dimred_manual.raw(xy,cell.feat =vec,alpha.val = 0.6,cls.col = NULL,add.labels = TRUE) + geom_text_repel(size = 13) + 
+  guides(colour = guide_legend(ncol = 5,title = "Cell Types",label.theme = element_text(size = 15),title.theme = element_text(size = 17),
+                               override.aes = list(alpha = 1,size = 4)))
+
+# extract legend
+library(ggpubr)
+leg = get_legend(pobj.ct.broad) 
+leg = as_ggplot(leg)
+
+pobj.ct.broad = pobj.ct.broad + guides(colour = "none") + 
+  theme_classic() + 
+  theme(axis.line = element_blank(),axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank()) +
+  annotate(geom = "segment",x = quantile(xy[,1],0),xend = quantile(xy[,1],0.1),y = min(xy[,2]),yend = min(xy[,2]),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc"))) + 
+  annotate(geom = "segment",x = min(xy[,1]),xend = min(xy[,1]),y = min(xy[,2]),yend = quantile(xy[,2],0.1),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc")) )
+
+pobj.ct.broad = pobj.ct.broad/leg + plot_layout(ncol = 1,heights = c(6,1))
+
+## get fine cell type
+vec = seu@meta.data$inferred.cell.type.fine;names(vec) = colnames(seu)
+vec = vec[rownames(xy)]
+singleton = names(table(vec))[table(vec) <= 10]
+vec[vec %in% singleton] = NA
+pobj.ct.fine = plot_dimred_manual.raw(xy,cell.feat =vec,alpha.val = 0.3,cls.col = NULL,add.labels = TRUE,is.repel =TRUE) + geom_text_repel(size = 13) + 
+  guides(colour = guide_legend(ncol = 4,title = "Cell Types",label.theme = element_text(size = 12),title.theme = element_text(size = 17),
+                               override.aes = list(alpha = 1,size = 4)))
+
+# extract legend
+library(ggpubr)
+leg = get_legend(pobj.ct.fine) 
+leg = as_ggplot(leg)
+
+pobj.ct.fine = pobj.ct.fine + 
+  guides(colour = "none") + 
+  theme_classic() + 
+  theme(axis.line = element_blank(),axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank()) +
+  annotate(geom = "segment",x = quantile(xy[,1],0),xend = quantile(xy[,1],0.1),y = min(xy[,2]),yend = min(xy[,2]),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc"))) + 
+  annotate(geom = "segment",x = min(xy[,1]),xend = min(xy[,1]),y = min(xy[,2]),yend = quantile(xy[,2],0.1),colour = "black",arrow = grid::arrow(length = unit(0.015, "npc")) )
+
+pobj.ct.fine = pobj.ct.fine/leg + plot_layout(ncol = 1,heights = c(6,3))
+
+# put plots together
+umap.obj = plot_grid(pobj.ct.broad,pobj.ct.fine,ncol = 2)
+
+print(umap.obj)
+```
+## [Section 4. Piechart representation of MSC clusters]{#S4}
+```{r cell type piechart}
+library(ggraph)
+htbl = subset(iter.res$pruned.table,module.size >= 30 & module.size <= ncol(seu)*0.8)[,c("cluster.name","parent.cluster")]
+modules = iter.res$modules
+
+# for cell type
+vec.ct = seu@meta.data$inferred.cell.type.broad;names(vec.ct) = colnames(seu);
+colmap.ct = c("B cells" = "blueviolet","NK cells" = "deeppink1","CD8+ T cells" = "brown","CD4+ T cells" = "slateblue","T cells" = "cadetblue1",
+              "Progenitors" = "chocolate1","Basophils" = "darkgoldenrod1","Monocytes" = "darkseagreen4","Neutrophils" = "chartreuse",
+              "Dendritic cells" = "red","Erythroblast" = "burlywood1","Platelets" = "lightblue","HSC_-G-CSF" = "blue","HSC_CD34+" = "deepskyblue","MEP" = "rosybrown")
+
+
+pie.ct = plot_hierarchy_pie(htbl,modules,vec.ct,colmap = colmap.ct,edge_colour = "grey") + 
+  guides(fill = guide_legend(title.position = "top",title.hjust = 0.5,ncol = 4,title = "Cell Types",title.theme = element_text(size = 17),label.theme = element_text(size = 15)))
+txt.dat = pie.ct$data[,c("x","y","name")]
+txt.dat = subset(txt.dat,name %in% c(subset(iter.res$pruned.table,parent.cluster == "M1")$cluster.name))
+
+# extract legend
+library(ggpubr)
+leg = get_legend(pie.ct)
+leg = as_ggplot(leg)
+
+# add text and clean plot
+library(ggrepel)
+pie.ct = pie.ct + geom_text_repel(data = txt.dat,aes(x = x,y = y,label = name),colour = "darkblue",segment.colour = "darkblue",vjust = 1.5,size = 6) + 
+  guides(fill = "none") + 
+  theme(panel.border = element_blank(),legend.position = "right",legend.direction = "vertical",
+        legend.text = element_text(size = 16),
+        plot.title = element_text(size = 20,hjust = 0.5),
+        plot.margin = margin(t = 0,r = 0,b = 0,l = 0)) 
+
+pie.ct = plot_grid(pie.ct,leg,ncol = 1,rel_heights = c(4,1))
+
+
+# sample composition
+vec.sc = seu@meta.data$subject.group.name;
+vec.sc = gsub(" patient| control|case of ","",vec.sc)
+names(vec.sc) = colnames(seu);
+colmap.sc = c("Influenza" = "darkorange","Asymptomatic COVID-19" = "brown","mild COVID-19" = "deeppink1","severe COVID-19" = "red",
+              "healthy" = "chartreuse")
+
+
+pie.sc = plot_hierarchy_pie(htbl,modules,vec.sc,colmap = colmap.sc,edge_colour = "grey") + 
+  guides(fill = guide_legend(title.position = "top",title.hjust = 0.5,nrow = 2,title = "Disease Status",title.theme = element_text(size = 17),label.theme = element_text(size = 15)))
+txt.dat = pie.sc$data[,c("x","y","name")]
+txt.dat = subset(txt.dat,name %in% c(subset(iter.res$pruned.table,parent.cluster == "M1")$cluster.name))
+
+# extract legend
+library(ggpubr)
+leg = get_legend(pie.sc)
+leg = as_ggplot(leg)
+
+# add text and clean plot
+library(ggrepel)
+pie.sc = pie.sc + geom_text_repel(data = txt.dat,aes(x = x,y = y,label = name),colour = "darkblue",segment.colour = "darkblue",vjust = 1.5,size = 6) + 
+  guides(fill = "none") + 
+  theme(panel.border = element_blank(),legend.position = "right",legend.direction = "vertical",
+        legend.text = element_text(size = 16),
+        plot.title = element_text(size = 20,hjust = 0.5),
+        plot.margin = margin(t = 0,r = 0,b = 0,l = 0)) 
+
+pie.sc = plot_grid(pie.sc,leg,ncol = 1,rel_heights = c(5,1))
+
+
+pie.collect = plot_grid(pie.ct,pie.sc,ncol = 1)
+
+print(pie.collect)
+```
+
+## [Section 5. Cell type detection performance metrics]{#S5}
+```{r performance metrics}
+###### get module evaluated
+max.size = 0.8*ncol(seu)
+min.size = 10
+mod.lst = c(list(MSC = iter.res$modules[iter.res$module.table$cluster.name]),
+            apply(snn.out$cluster.matrix,2,function(x) split(rownames(snn.out$cluster.matrix),factor(x))))
+names(mod.lst) = gsub("seurat_snn_res\\.","SNN \u03B3=",names(mod.lst))
+mod.lst = lapply(mod.lst,function(x) x[sapply(x,length) <= max.size & sapply(x,length) >= min.size])
+mod.lst = mod.lst[c("MSC","SNN γ=0.4","SNN γ=0.8","SNN γ=1.2")]
+# broad cell type
+ct.lst = split(colnames(seu),factor(seu@meta.data$inferred.cell.type.broad))
+eval.out.broad = evaluate_methods(ct.lst = ct.lst,mod.lst)
+accu.mat.broad = do.call('rbind',lapply(mod.lst,function(x) accuracy_vector(mod.o = ct.lst,mod.f = x)))
+ct.len.broad= sapply(ct.lst,length)
+
+# fine cell type
+ct.lst = split(colnames(seu),factor(seu@meta.data$inferred.cell.type.fine))
+tbl = table(seu@meta.data$inferred.cell.type.fine)
+ct.lst = ct.lst[names(tbl)[tbl >= min.size]]
+eval.out.fine = evaluate_methods(ct.lst = ct.lst,mod.lst)
+accu.mat.fine = do.call('rbind',lapply(mod.lst,function(x) accuracy_vector(mod.o = ct.lst,mod.f = x)))
+ct.len.fine = sapply(ct.lst,length)
+
+### accuracy scatter plot
+require(reshape)
+pdat = data.frame()
+df = melt(accu.mat.broad);colnames(df) = c("method","cell.type","accuracy")
+df$type = "Major Cell Types"
+pdat = rbind.data.frame(pdat,df)
+rm(df)
+df = melt(accu.mat.fine);colnames(df) = c("method","cell.type","accuracy")
+df$type = "Sub-populations"
+pdat = rbind.data.frame(pdat,df)
+rm(df)
+
+# match colors with barplots 
+colmap = ggplot_build(eval.out.broad[[1]])$data[[1]]$fill
+names(colmap) = names(mod.lst)
+
+# get major cell type plot
+acc.obj.broad = ggplot(data = subset(pdat,type == "Major Cell Types"),
+                       aes(x = cell.type,y = accuracy,fill = method)) + geom_bar(stat = "identity",position = "dodge") + 
+  scale_x_discrete(limits = names(ct.len.broad)[order(ct.len.broad,decreasing =T)]) + 
+  labs(y = "Per Cell Type\nDetection Accuracy",subtitle = "Major Cell Types") + 
+  scale_y_continuous(limits = c(0,1)) + 
+  scale_fill_manual(values = colmap) + 
+  guides(fill = guide_legend(title = "Method",ncol = 4)) + 
+  theme_bw() + 
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1,size = 15),
+        legend.position = "bottom",legend.text = element_text(size = 14),legend.title = element_text(size = 17),
+        axis.title.y = element_text(size = 17),axis.text.y = element_text(size = 15),
+        plot.subtitle = element_text(size = 17,hjust = 0.5,face = "bold"))
+
+# get subpopulation
+acc.obj.fine = ggplot(data = subset(pdat,type == "Sub-populations"),
+                      aes(x = cell.type,y = accuracy,fill = method)) + geom_bar(stat = "identity",position = "dodge") + 
+  scale_x_discrete(limits = names(ct.len.fine)[order(ct.len.fine,decreasing =T)]) + 
+  scale_y_continuous(limits = c(0,1)) + 
+  scale_fill_manual(values = colmap) + 
+  labs(y = "Per Cell Type\nDetection Accuracy",subtitle = "Sub-populations") + 
+  guides(fill = "none") + 
+  theme_bw() + 
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1,size = 15),
+        legend.position = "bottom",legend.text = element_text(size = 14),legend.title = element_text(size = 17),
+        axis.title.y = element_blank(),axis.text.y = element_text(size = 15),
+        plot.subtitle = element_text(size = 17,hjust = 0.5,face = "bold"))
+
+# extract legend
+library(ggpubr)
+leg = get_legend(acc.obj.broad)
+leg = as_ggplot(leg)
+acc.obj.broad = acc.obj.broad + guides(fill = "none")
+
+plot.obj=(acc.obj.broad | acc.obj.fine) + plot_layout(ncol = 2,widths = c(0.7,2))
+
+plot.obj.wt.leg = (plot.obj/leg) + plot_layout(ncol = 1,heights = c(5,1))
+
+#### calculate detected cell types in a range of threshold
+thval = seq(0.5,1,0.05)
+
+# fine cell type
+ct.lst = split(colnames(seu),factor(seu@meta.data$inferred.cell.type.fine))
+tbl = table(seu@meta.data$inferred.cell.type.fine)
+ct.lst = ct.lst[names(tbl)[tbl >= min.size]]
+
+det.lst = lapply(mod.lst,function(x){
+  jac = calculate_jaccard(mod.o = ct.lst,mod.f = x);
+  data.frame(cutoff = thval,num.detect = sapply(thval,function(y) sum(rowSums(jac >= y,na.rm =T) > 0)))
+})
+for (i in 1:length(det.lst)) det.lst[[i]]$method = rep(names(det.lst)[i],nrow(det.lst[[i]]))
+det.data = do.call('rbind.data.frame',det.lst)
+
+det.obj = ggplot(data = det.data,aes(x = factor(cutoff,levels = thval),y = method,fill = num.detect)) + geom_tile() +
+  geom_text(aes(label = num.detect),size= 5) + 
+  scale_y_discrete(limits = names(mod.lst)) + 
+  scale_fill_gradient(low = "yellow",high = "red") + 
+  labs(x = "Detection Thresholds",subtitle = "#. of Detected Sub-populations") + 
+  guides(fill = guide_colourbar(title = "#. Detected")) +
+  theme_classic() + 
+  theme(axis.title.y = element_blank(),axis.text.x = element_text(size = 14,angle = 45,vjust = 1,hjust = 1),
+        plot.subtitle = element_text(size = 19,hjust = 0.5,face ="bold"),
+        axis.title.x = element_text(size = 17),axis.text.y = element_text(size = 14),
+        legend.title = element_text(size = 17),legend.text = element_text(size = 13))
+
+ct.perf = plot_grid(eval.out.broad[[1]],eval.out.fine[[1]],ncol = 2)
+
+print(ct.perf)
+```
+
+## [Section 6. Sunburst plots for sample enrichments in different infection groups]{#S6}
+```{r sunburst}
+
+bg = colnames(seu)
+
+### Run Fisher's Exact Test for cell clusters and cells from different samples
+# split sample cells
+sample.set = split(colnames(seu),factor(seu@meta.data$sample))
+
+# annotate samples with disease status
+sample.annot = data.frame(sid = names(sample.set),disease = as.character(seu@meta.data$subject.group.name[match(names(sample.set),seu@meta.data$sample)]))
+mods = iter.res$modules[unique(htbl[[1]],htbl[[2]])]
+fet.res = perform.AllPairs.FET(geneSets1 = sample.set,geneSets2 = mods,background = bg,
+                               or = 1,alternative = "greater",
+                               adjust.FET.pvalue = T,do.multicore = F,n.cores = NULL)
+fet.res$disease = sample.annot$disease[match(fet.res$set1_Name,sample.annot[[1]])]
+fet.res$corrected.FET.pvalue = p.adjust(fet.res$FET_pvalue,"BH")
+
+fet.data = fet.res[,-12]
+colnames(fet.data)[c(1,2)] = c("sample.id","MSC.cluster")
+colnames(fet.data)[c(3:5)] = c("total.num.cells","sample.num.cells","MSC.cluster.num.cells")
+#write.table(fet.data,file = paste0(out.dir,"/samplewise_enrichments_in_MSC_clusters.FET.txt"),sep = "\t",row.names = F,col.names = T,quote = F)
+
+# summarize enrichments
+require(reshape2)
+hit.number = acast(data = fet.res,formula = disease ~ set2_Name,value.var = "corrected.FET.pvalue",fun.aggregate = function(x) sum(x < 0.05,na.rm = T)/length(x))
+rownames(hit.number) = gsub(" patient$| control$| case of","",rownames(hit.number))
+
+require(MEGENA)
+sb.data = cbind.data.frame(htbl,as.data.frame(t(hit.number[,match(htbl[[1]],colnames(hit.number))])))
+sb.res = vector("list",nrow(hit.number))
+for (i in 1:nrow(hit.number))
+{
+  feat.id = rownames(hit.number)[i]
+  sb.obj = draw_sunburst_wt_fill(module.df = sb.data,feat.col = feat.id,log.transform = FALSE,
+                                 min.angle = 10,
+                                 fill.type = "continuous",
+                                 fill.scale = scale_fill_gradient2(low = alpha("blue",0.5),mid = "white",high = alpha("red",0.5),midpoint = 0.5,na.value = "white",labels = scales::label_percent()), 
+                                 id.col = "cluster.name",parent.col = "parent.cluster")
+  sb.obj = sb.obj + labs(title = feat.id) + theme_classic() + 
+    guides(fill = guide_colorbar(title = "%. Samples Enriched",title.position = "top")) + 
+    theme(axis.line = element_blank(),axis.ticks = element_blank(),axis.title = element_blank(),axis.text = element_blank(),
+          legend.position = "bottom",legend.direction = "horizontal",
+          legend.title = element_text(size = 16,hjust = 0.5),
+          legend.text = element_text(angle = 45,vjust = 1,hjust = 1,size = 12),
+          legend.key.width = unit(dev.size()[1] / 20, "inches"),
+          plot.title = element_text(size = 17,hjust = 0.5))
+  
+  if (i == 1)
+  {
+    library(ggpubr)
+    leg = get_legend(sb.obj) 
+    leg = as_ggplot(leg)
+  }
+  sb.obj = sb.obj + guides(fill = "none")
+  sb.res[[i]] = sb.obj
+  
+  rm(feat.id,sb.obj)
+}
+sb.collect = plot_grid(plotlist = c(sb.res,list(leg)),ncol = 3)
+print(sb.collect)
+```
