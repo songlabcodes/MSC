@@ -1,0 +1,278 @@
+---
+title: "Wu et al. 2021 workflow"
+author: "Won-Min Song"
+date: '2024-12-16'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##### MSC analysis of single-cell transcriptome of breast cancer
+This is the R script used to reproduce Figure 6 of the MSC manuscript to analyze breast cancer scRNA-seq from Wu et al. 2021. The pre-processed data by Seurat workflow (integrated_data.seurat_wt_celltype.RDS), SNN-based results (SNN.clusters.RDS), MSC results (Flu.MSC_results.RDS) and codes for evaluation metric (evaluation_functions.R) can be downloaded from Synpase with DOI, [https://doi.org/10.7303/syn52966803](https://doi.org/10.7303/syn52966803), under 'Wu_et_al_2021' folder. Placing these files under the working directory will run the codes below.
+
+## [Section 1. Loading data]{#S1}
+```{r Loading data}
+rm(list = ls())
+
+library(Seurat)
+library(Matrix.utils)
+library(Matrix)
+library(doParallel)
+library(igraph)
+library(ggraph)
+library(MSC)
+library(cowplot)
+
+setwd("/media/won-min/My Passport1/SingleCell/Cancer/Breast/Wu_et_al_2021")
+
+# load functions
+if (file.exists("evaluation_functions.R")) source("evaluation_functions.R")
+if (file.exists("enrichment_functions.v3.R")) source("enrichment_functions.v3.R")
+
+seu = readRDS(file = "Breast_Wu.NG.2021.Singlet.RPCA_CCA_updated_wt_SCT.rds")
+
+
+```
+## [Section 2. UMAP plots of cell types and MSC results]{#S2}
+```{r UMAPs, echo = F}
+thm = theme(plot.title = element_blank(),axis.line = element_blank(),
+            axis.ticks = element_blank(),axis.title = element_blank(),
+            axis.text.x = element_blank(),axis.text.y = element_blank())
+umap.major = DimPlot(seu,group.by = "celltype_major",reduction = "umap.rpca",alpha = 0.3,label = T) + guides(colour = "none") + thm
+umap.minor = DimPlot(seu,group.by = "celltype_minor",reduction = "umap.rpca",alpha = 0.3,label = T,repel = T) + guides(colour = "none") + thm
+
+# add MSC first split layer into umap
+iter.res = readRDS("MSC_results.RDS")
+snn.res = readRDS(file = "SNN_results.RDS")
+snn.res = snn.res[,c("SNN γ=0.4","SNN γ=0.8","SNN γ=1.2")]
+
+# get the membership rooted to certain parent module
+vec = get_rooted_membership(mtbl = iter.res$module.table,
+                            modules = iter.res$modules,
+                            pid = "M1",bg = colnames(seu))
+xy = Embeddings(seu,"umap.rpca")
+umap.msc = plot_dimred_manual.raw(xy,
+                                  cell.feat = vec,
+                                  alpha.val = 0.3,cls.col = NULL,add.labels = TRUE)
+umap.msc = umap.msc + guides(colour = "none") + theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),
+                                                      axis.line = element_blank(),plot.background = element_blank(),
+                                                      panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                      panel.border = element_blank())
+
+# add SNN results
+xy = Embeddings(seu,"umap.rpca")
+umap.snn.lst = vector("list",ncol(snn.res));
+names(umap.snn.lst) = colnames(snn.res)
+for (i in 1:ncol(snn.res))
+{
+  cell.feat = snn.res[[i]]
+  names(cell.feat) = rownames(snn.res)
+  umap.snn.lst[[i]] = plot_dimred_manual.raw(xy,cell.feat = cell.feat,alpha.val = 0.3,cls.col = NULL,add.labels = TRUE) + 
+    guides(colour = "none") + 
+    theme(axis.title = element_blank(),axis.text = element_blank(),axis.ticks = element_blank(),
+          axis.line = element_blank(),plot.background = element_blank(),
+          panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.border = element_blank())
+  
+}
+umap.snn = plot_grid(plotlist = umap.snn.lst,ncol = 3,labels = names(umap.snn.lst))
+umap.comb = plot_grid(umap.major,umap.minor,umap.msc,ncol = 3,labels = c("Major Cell Types","Minor Cell Types","MSC 1st Layer"))
+plot_grid(umap.comb,umap.snn,ncol = 1)
+
+
+```
+
+## [Section 3. Cell type detection performance metrics]{#S3}
+```{r performance metrics,echo = F}
+
+# Format cell type annotations from published study into a list of cell clusters 
+cls.major.lst = split(colnames(seu),factor(seu@meta.data$celltype_major))
+cls.minor.lst = split(colnames(seu),factor(seu@meta.data$celltype_minor))
+cls.subset.lst = split(colnames(seu),factor(seu@meta.data$celltype_subset))
+
+# identify cell types identified across a range of detection thresholds. 
+detect.vec = seq(0.5,1,0.05)
+# evaluate for major cell types
+snn.lst = apply(snn.res,2,function(x) split(names(x),factor(x)))
+snn.lst = snn.lst[c("SNN γ=0.4","SNN γ=0.8","SNN γ=1.2")]
+mod.lst = c(list(MSC = iter.res$modules),snn.lst)
+
+# run evaluation pipeline
+res.major = evaluate_methods(ct.lst = cls.major.lst,mod.lst = mod.lst)
+res.minor = evaluate_methods(ct.lst = cls.minor.lst,mod.lst = mod.lst)
+res.subset = evaluate_methods(ct.lst = cls.subset.lst,mod.lst = mod.lst)
+rm(iter.res,snn.res)
+
+# calculate the numbers of detected cell types
+jac.lst = lapply(mod.lst,function(x) calculate_jaccard(mod.o = cls.major.lst,mod.f = x))
+jac.score = lapply(jac.lst,function(x) apply(x,1,max))
+detect.major = do.call('cbind',lapply(jac.score,function(x) sapply(detect.vec,function(y,z){sum(z > y,na.rm= T)/length(z)},z=x)));
+rownames(detect.major) = detect.vec
+
+jac.lst = lapply(mod.lst,function(x) calculate_jaccard(mod.o = cls.minor.lst,mod.f = x))
+jac.score = lapply(jac.lst,function(x) apply(x,1,max))
+detect.minor = do.call('cbind',lapply(jac.score,function(x) sapply(detect.vec,function(y,z){sum(z > y,na.rm= T)/length(z)},z=x)))
+rownames(detect.minor) = detect.vec
+
+jac.lst = lapply(mod.lst,function(x) calculate_jaccard(mod.o = cls.subset.lst,mod.f = x))
+jac.score = lapply(jac.lst,function(x) apply(x,1,max))
+detect.subset = do.call('cbind',lapply(jac.score,function(x) sapply(detect.vec,function(y,z){sum(z > y,na.rm= T)/length(z)},z=x)))
+rownames(detect.subset) = detect.vec
+
+#### Create barplots to detect different methods
+require(reshape)
+detect.mat.lst = list(celltype.major = detect.major,celltype.minor = detect.minor,celltype.subset = detect.subset)
+detect.obj.lst = vector("list",length(detect.mat.lst));
+names(detect.obj.lst) = names(detect.mat.lst)
+for (i in 1:length(detect.mat.lst))
+{
+  detect.dat = melt(detect.mat.lst[[i]]);
+  colnames(detect.dat) = c("Detect.Cutoff","Method","Detect.Rate")
+  detect.dat$detection.num = as.integer(detect.dat$Detect.Rate * length(cls.major.lst))
+  #detect.dat[[1]] = detect.dat[[1]] * 100
+  detect.obj.lst[[i]] = ggplot() + 
+    geom_tile(data = detect.dat,aes(y = Method,x = Detect.Cutoff,fill = Detect.Rate)) + 
+    geom_text(data = detect.dat,aes(y = Method,x = Detect.Cutoff,label = detection.num)) + 
+    #scale_x_discrete(labels = scales::label_percent()) + 
+    scale_fill_gradient(low = "yellow",high = "red",labels = scales::label_percent()) + theme_classic() + 
+    guides(fill = guide_colorbar(title = "%. Detected")) + 
+    labs(x = "Detection Thresholds") + 
+    theme(axis.title.y = element_blank(),
+          axis.title.x = element_text(size = 17),axis.text = element_text(size = 15),legend.title = element_text(size = 15),
+          legend.text = element_text(size = 11,angle = 45,vjust = 1,hjust = 1),legend.position = "bottom")
+  
+}
+
+comb.perf = plot_grid(plotlist = detect.obj.lst,ncol = 3)
+print(comb.perf)
+
+```
+## [Section 4. Pie chart visualization of MSC clusters]{#S4}
+```{r pie chart, echo=FALSE}
+
+### First, find unique clusters by MSC by comparing to published cell types and SNN-based results
+require(reshape2)
+cls.major.lst = split(colnames(seu),factor(seu@meta.data$celltype_major))
+cls.minor.lst = split(colnames(seu),factor(seu@meta.data$celltype_minor))
+cls.subset.lst = split(colnames(seu),factor(seu@meta.data$celltype_subset))
+bg = colnames(seu)
+
+iter.res = readRDS("/media/won-min/My Passport1/SingleCell/Cancer/Breast/Wu_et_al_2021/MSC_Results_RPCA/MSC_results.RDS")
+snn.res = readRDS(file = "/media/won-min/My Passport1/SingleCell/Cancer/Breast/Wu_et_al_2021/MSC_Results_RPCA/SNN_results.RDS")
+snn.lst = apply(snn.res,2,function(x) split(names(x),factor(x)))
+snn.lst = snn.lst[c("SNN γ=0.4","SNN γ=0.8","SNN γ=1.2")]
+
+# use 10% threshold to identify cell clusters with large overlaps with known cell types and SNN clusters
+jac.annot = calculate_jaccard(mod.o = c(cls.major.lst,cls.minor.lst,cls.subset.lst),iter.res$modules)
+jac.snn = calculate_jaccard(mod.o = do.call('c',snn.lst),iter.res$modules)
+sig.hits.annot = colSums(jac.annot > 0.1)
+sig.hits.snn = colSums(jac.snn > 0.1)
+
+# get unique modules by MSC: require no significant hits with 10% thresholds
+sig.mids = intersect(names(sig.hits.annot)[sig.hits.annot == 0],names(sig.hits.snn)[sig.hits.snn == 0])
+sig.mids = sig.mids[sapply(iter.res$modules[sig.mids],length) > 50]
+
+sig.mods = iter.res$modules[sig.mids]
+sig.mods = sig.mods[sapply(sig.mods,length) > 50]
+sig.mods = sig.mods[order(sapply(sig.mods,length),decreasing = T)]
+
+vec = seu@meta.data$celltype_subset;names(vec) = colnames(seu)
+sapply(sig.mods,function(x) table(vec[x]))
+
+### Summarize the findings with pie chart plot
+library(ggrepel)
+mtbl = subset(iter.res$module.table,module.size > 50)
+htbl = mtbl[,c("cluster.name","parent.cluster")]
+modules = iter.res$modules[mtbl$cluster.name]
+vec = seu@meta.data$celltype_major;names(vec) = colnames(seu)
+edge_colour = "grey"
+colmap = NULL
+
+# create the basis graph object
+g = graph.data.frame(htbl[-1,c(2,1)],directed = TRUE)
+dfs.out = dfs(graph = g,root = "M1",mode = "out",dist = T)
+pobj = ggraph(graph = g, layout = 'dendrogram', circular = TRUE) + geom_edge_diagonal(edge_colour = edge_colour)
+
+# make piechart data
+library(scatterpie)
+categ.mat = overlap_modules_wt_categ(mods = modules,vec = vec )
+node.dat = cbind.data.frame(pobj$data,as.data.frame(categ.mat[match(pobj$data$name,rownames(categ.mat)),]))
+#node.dat$is.unique = node.dat$name %in% names(sig.mods)
+node.dat$is.compact = mtbl$is.valid[match(node.dat$name,mtbl$cluster.name)]
+node.dat$root.distance = dfs.out$dist[match(node.dat$name,names(dfs.out$dist))]
+node.dat$radius.size = max(node.dat$root.distance,na.rm = T) - node.dat$root.distance + 1
+
+# add annotation for unique modules
+if (is.null(colmap))
+{
+  library(RColorBrewer)
+  colmap = colorRampPalette(brewer.pal(11,"Spectral"))(ncol(categ.mat))
+  names(colmap) = colnames(categ.mat)
+  
+  if (any(names(colmap) == "unassigned")) colmap["unassigned"] = "grey"
+  colmap = adjustcolor(colmap,alpha.f = 0.5)
+}
+
+pobj = pobj + geom_scatterpie(aes(x=x, y = y,color = is.compact,r = radius.size*0.006), data=node.dat,
+                              cols=colnames(categ.mat)) + scale_fill_manual(values = colmap) + coord_equal() +
+  scale_color_manual(values = c("TRUE" = adjustcolor( "black", alpha.f = 0.7),"FALSE" = adjustcolor( "grey", alpha.f = 0.3))) + 
+  guides(colour = "none",fill = guide_legend(title = "Major Cell Type",ncol = 3)) + 
+  theme_bw() + 
+  theme(axis.line = element_blank(),axis.ticks = element_blank(),axis.title = element_blank(),panel.grid = element_blank(),panel.border = element_blank(),
+        panel.grid.major = element_blank(),panel.grid.minor = element_blank(),axis.text = element_blank(),
+        legend.position="bottom",legend.box="horizontal",
+        legend.text = element_text(size = 14),legend.title = element_text(size = 16))
+
+# add first layer divide names
+text.dat = subset(pobj$data,name %in% subset(mtbl,parent.cluster == "M1")$cluster.name)
+pobj = pobj + geom_text(data = subset(pobj$data,name %in% subset(mtbl,parent.cluster == "M1")$cluster.name),
+                        aes(x = x,y = y,label = name),nudge_y = 0.05,nudge_x = 0.04,size = 5) + 
+  geom_text_repel(data = subset(pobj$data,name %in% names(sig.mods)),colour = "brown",
+                  aes(x = x,y = y,label = name),size = 5)
+
+print(pobj)
+
+```
+## [Section 5. Visualize M138, a endothelial subset uniquely identified by MSC]
+```{r endo subset, echo = FALSE}
+# re-process data
+cell.names = iter.res$modules$M138
+
+seu.sub = subset(seu,celltype_major == "Endothelial")
+seu.sub = PrepSCTFindMarkers(seu.sub)
+
+# find variable dimensions
+xy = Embeddings(seu.sub,reduction = "integrated.rpca")
+seu.sub <- RunUMAP(seu.sub, reduction = "integrated.rpca", dims = which(apply(xy,2,var) > 5), reduction.name = "umap.rpca")
+
+vec = rep(NA,ncol(seu.sub))
+vec[colnames(seu.sub) %in% cell.names ] = "M138"
+seu.sub@meta.data$tmp.group = factor(vec)
+ct.tbl = table(seu.sub@meta.data$celltype_minor )
+seu.sub@meta.data$celltype_minor[seu.sub@meta.data$celltype_minor %in% names(ct.tbl)[ct.tbl < 10]] = NA
+
+# show UMAP visualization
+vec = seu.sub@meta.data$celltype_subset
+vec[colnames(seu.sub) %in% iter.res$modules$M138] = "Endothelial Capillary CA4\n(M138)"
+seu.sub@meta.data$celltype_subset_wt_msc = vec
+
+thm = theme(plot.title = element_blank(),axis.line = element_blank(),
+            axis.ticks = element_blank(),axis.title = element_blank(),
+            axis.text.x = element_blank(),axis.text.y = element_blank(),
+            legend.position = "bottom",legend.justification = "center")
+msc.obj = DimPlot(seu.sub,reduction = "umap.rpca",group.by = "tmp.group",label = T,label.size = 7) + 
+  scale_colour_manual(breaks = c("M138"),values = c("M138" = "red"),na.value = "grey66") + 
+  guides(colour = guide_legend(ncol = 3,override.aes = list(size = 5))) + thm
+minor.obj = DimPlot(seu.sub,reduction = "umap.rpca",group.by = "celltype_minor",label = T) + guides(colour = guide_legend(ncol = 3,override.aes = list(size = 5))) + thm
+
+# feature plot for markers
+spec.sig = c("CA4","AQP7","TNMD","ATOH8","LIPE","LNX1","TIMP4")
+custom.guide = guides(colour = guide_colourbar(title = "Average\nExpression"),size = guide_legend(title = "%.\nExpressed")) 
+  thm = theme(axis.title = element_blank(),axis.text.x = element_text(angle = 45,vjust =1,hjust = 1))
+  scale.col = scale_colour_gradient(low = "lightgrey",high = "blue",limits = c(-1.5,2)) 
+  scale.rad = scale_radius(range = c(0,6),limits = c(0,50))
+pf = DotPlot(seu.sub,features = spec.sig,group.by = "celltype_subset_wt_msc") + custom.guide + thm + scale.col + scale.rad
+
+print(msc.obj + minor.obj + pf)
+```
