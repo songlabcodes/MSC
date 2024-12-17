@@ -2,7 +2,9 @@
 title: "8k PBMC Example"
 author: "Won-Min Song"
 date: '2024-12-13'
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -213,7 +215,7 @@ while (do.probe)
 }
 iter.res$root.cluster = mo
 
-saveRDS(iter.res,file = paste0(out.dir,"/MSC_Pearson.RDS"))
+#saveRDS(iter.res,file = paste0(out.dir,"/MSC_Pearson.RDS"))
 
 iter.res.cor = iter.res;
 rm(iter.res)
@@ -276,7 +278,7 @@ while (do.probe)
 }
 iter.res$root.cluster = mo
 
-saveRDS(iter.res,file = paste0(out.dir,"/MSC_Euclidean.RDS"))
+#saveRDS(iter.res,file = paste0(out.dir,"/MSC_Euclidean.RDS"))
 
 iter.res.euc = iter.res;
 rm(iter.res)

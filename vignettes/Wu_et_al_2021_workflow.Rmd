@@ -25,7 +25,8 @@ library(ggraph)
 library(MSC)
 library(cowplot)
 
-setwd("/media/won-min/My Passport1/SingleCell/Cancer/Breast/Wu_et_al_2021")
+root.dir = "/media/won-min/My Passport1/SingleCell/Cancer/Breast/Wu_et_al_2021"
+setwd(root.dir)
 
 # load functions
 if (file.exists("evaluation_functions.R")) source("evaluation_functions.R")
@@ -37,6 +38,7 @@ seu = readRDS(file = "Breast_Wu.NG.2021.Singlet.RPCA_CCA_updated_wt_SCT.rds")
 ```
 ## [Section 2. UMAP plots of cell types and MSC results]{#S2}
 ```{r UMAPs, echo = F}
+setwd(root.dir)
 thm = theme(plot.title = element_blank(),axis.line = element_blank(),
             axis.ticks = element_blank(),axis.title = element_blank(),
             axis.text.x = element_blank(),axis.text.y = element_blank())
@@ -85,7 +87,7 @@ plot_grid(umap.comb,umap.snn,ncol = 1)
 
 ## [Section 3. Cell type detection performance metrics]{#S3}
 ```{r performance metrics,echo = F}
-
+setwd(root.dir)
 # Format cell type annotations from published study into a list of cell clusters 
 cls.major.lst = split(colnames(seu),factor(seu@meta.data$celltype_major))
 cls.minor.lst = split(colnames(seu),factor(seu@meta.data$celltype_minor))
@@ -150,7 +152,7 @@ print(comb.perf)
 ```
 ## [Section 4. Pie chart visualization of MSC clusters]{#S4}
 ```{r pie chart, echo=FALSE}
-
+setwd(root.dir)
 ### First, find unique clusters by MSC by comparing to published cell types and SNN-based results
 require(reshape2)
 cls.major.lst = split(colnames(seu),factor(seu@meta.data$celltype_major))
@@ -236,6 +238,7 @@ print(pobj)
 ```
 ## [Section 5. Visualize M138, a endothelial subset uniquely identified by MSC]
 ```{r endo subset, echo = FALSE}
+setwd(root.dir)
 # re-process data
 cell.names = iter.res$modules$M138
 

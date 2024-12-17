@@ -16,7 +16,7 @@ This is the R script used to perform comparative analysis of MSC with other benc
 [Section 2. Calculate clusters using benchmark methods](#S2): The main folder contains .RDS files to hold results for individual benchmark methods. Placing "single_layer_cluster_results.RDS" in the working folder will bypass this section.;\
 [Section 3. Calculate clusters using MSC](#S3): The main folder contains .RDS files to hold MSC results from Pearson's correlation (iterative_MSC.correlation.results.RDS) and Euclidean distance (iterative_MSC.euclidean.results.RDS). Also, this section will generate results from the single-layer split by AdaptSplit without performing the iterative top-down approach. The discrete clustering results from the ADaptSplit can also be obtained from the Synapse repository (Pearson's correlation-based results: adaptsplit.correlation.results.RDS, Euclidean distance-based results: adaptsplit.euclidean.results.RDS). ;\
 [Section 4. Comparative evaluation of discrete partitions using adjusted Rand Index](#S4): This section reproduces the figures to calculate the adjusted Rand Index on single-layer clustering results including CIDR, SC3, SNN-based Louvain clustering and AdaptSplit;\
-[Section 5. Comparative evaluation of iterative top-down clustering results](#S5): This section reproduces the figures to calculate inclusion, coverage rates and detection accuracy for performance metrics in the gold standard clusters.;\ 
+[Section 5. Comparative evaluation of iterative top-down clustering results](#S5): This section reproduces the figures to calculate inclusion, coverage rates and detection accuracy for performance metrics in the gold standard clusters.;
 
 ## [Section 1. pipeComp data pre-processing]{#S1}
 
@@ -38,7 +38,6 @@ library(SC3)
 
 #### Set up folders
 root.dir <- "/home/won-min/Documents/R_packages/Single_Cell_Clustering/pipeComp_v3";setwd(root.dir)
-out.dir = "Results";dir.create(out.dir) # set up output folders
 
 min.size = 5 # minimum cell cluster size
 n.cores = 6 # number of cores to use
@@ -298,11 +297,11 @@ if (run.clustering)
 
 }
 
-
 ```
 
 ## [Section 4. Comparative evaluation of discrete partitions using adjusted Rand Index]{#S4}
 ```{r adjusted rand index, message = FALSE}
+setwd(root.dir)
 # load inputs
 if (!any(ls() == "seu.list")) seu.list = readRDS("quality_controlled_seurat.results.RDS")
 if (!any(ls() == "clus.results.layer")) clus.results.layer = readRDS("single_layer_cluster_results.RDS")
@@ -358,7 +357,7 @@ print(plot_grid(pobj.1,pobj.2))
 
 ## [Section 5. Comparative evaluation of iterative top-down clustering results]{#S5}
 ```{r evaluation, echo=FALSE}
-
+setwd(root.dir)
 if (!any(ls() == "clus.results.layer")) clus.results.layer = readRDS("single_layer_cluster_results.RDS")
 
 bench.names = c("seurat_snn.0.4", "seurat_snn.0.8", "seurat_snn.1.2", "SC3s","CIDR")
